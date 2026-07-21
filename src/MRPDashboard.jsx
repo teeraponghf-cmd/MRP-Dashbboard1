@@ -254,6 +254,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
 
     const gr = grossReq[item] || new Array(horizon).fill(0);
     const sr = schedReceiptByItem[item] || new Array(horizon).fill(0);
+    const consumption = gr.map((v) => v * safetyFactor); // buffered consumption used for planning math
     const projOnHand = new Array(horizon).fill(0);
     const netReq = new Array(horizon).fill(0);
     const plannedReceipt = new Array(horizon).fill(0);
@@ -262,7 +263,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
 
     let onHandPrev = effectiveOnHand;
     for (let i = 0; i < horizon; i++) {
-      let proj = onHandPrev + sr[i] - gr[i];
+      let proj = onHandPrev + sr[i] - consumption[i];
       if (proj < safety) {
         const need = safety - proj;
         const ordered = Math.ceil(need / lotSize) * lotSize;
@@ -270,7 +271,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
         proj += ordered;
       }
       projOnHand[i] = proj;
-      netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - gr[i]));
+      netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - consumption[i]));
       onHandPrev = proj;
     }
 
@@ -314,6 +315,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       expiringSoon,
       weeksToExpiry,
       grossReq: gr,
+      consumption,
       scheduledReceipts: sr,
       poPending: poPendingByItem[item] || new Array(horizon).fill(0),
       git: gitByItem[item] || new Array(horizon).fill(0),
@@ -541,6 +543,7 @@ function RecordGrid({ rec, weeks, weekLabels }) {
   if (!rec) return null;
   const rows = [
     { label: "Gross requirements (calculated)", data: rec.grossReq, kind: "gr" },
+    { label: `Consumption used for planning (\u00d7${rec.safetyFactor})`, data: rec.consumption, kind: "consumption" },
     { label: "Actual consumption (issued)", data: rec.actualConsumption, kind: "actual" },
     { label: "Variance (actual \u2212 calculated)", data: rec.consumptionVariance, kind: "variance" },
     { label: "PO pending", data: rec.poPending, kind: "po" },
@@ -659,6 +662,7 @@ function RecordGrid({ rec, weeks, weekLabels }) {
                   else if (r.kind === "prel" && v > 0) { bg = "#DCE7EE"; color = COLORS.steelDeep; }
                   if (r.kind === "po" && v > 0) { bg = "#F3DDBC"; color = COLORS.amber; }
                   if (r.kind === "git" && v > 0) { bg = "#E3E9D6"; color = COLORS.moss; }
+                  if (r.kind === "consumption" && rec.safetyFactor !== 1 && v > 0) { bg = "#DCE7EE"; color = COLORS.steelDeep; }
                   if (r.kind === "actual" && v > 0) { bg = "#E9E4F0"; color = "#5A4A78"; }
                   if (r.kind === "variance" && v !== null) {
                     if (Math.abs(v) < 0.5) { bg = "#E3E9D6"; color = COLORS.moss; }
