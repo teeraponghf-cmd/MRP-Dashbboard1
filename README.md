@@ -55,15 +55,17 @@ No server-side code needed at all.
 
 ## Notes on the current version
 
+- **Data persists automatically in your browser.** Uploaded CSVs, horizon,
+  and order-planning status are saved to `localStorage` after every change
+  and restored the next time you open the page — no re-upload needed. This
+  is per-browser, per-device storage: it won't follow you to a different
+  computer, and clearing browser data wipes it. Use the **"clear"** link
+  next to the run date in the app to reset back to sample data.
 - **No login, no multi-user separation.** Anyone with the URL who uploads a
-  CSV sees their own session only (data lives in browser memory, not shared
-  between visitors) — but there's also no access control. If this matters,
-  add a simple password gate or put it behind your company VPN/internal
-  network before sharing the link widely.
-- **No persistence.** Refreshing the page clears uploaded data — it's
-  upload-and-analyze, not a system of record. If you want it to remember the
-  last uploaded files between visits, that's a small addition (browser
-  storage) — ask and I can add it.
+  CSV sees their own session only (data lives in *their* browser, not
+  shared between visitors) — but there's also no access control. If this
+  matters, add a simple password gate or put it behind your company
+  VPN/internal network before sharing the link widely.
 - **Not connected to your ERP.** You still export CSVs from your real system
   and upload them here each time. If you eventually want a live connection
   instead of CSV upload, that requires a backend and is a bigger project.

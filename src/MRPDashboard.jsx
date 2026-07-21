@@ -294,6 +294,54 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, hor
 }
 
 // ---------- CSV helpers ----------
+// ---------- Storage adapter ----------
+// Prefers the artifact's persistent window.storage API (works inside claude.ai).
+// Falls back to browser localStorage when window.storage isn't present (standalone deploy).
+const STORAGE_PREFIX = "mrp_dashboard:";
+async function storageGet(key) {
+  try {
+    if (typeof window !== "undefined" && window.storage && typeof window.storage.get === "function") {
+      const res = await window.storage.get(STORAGE_PREFIX + key, false);
+      return res ? JSON.parse(res.value) : null;
+    }
+  } catch (e) { /* not found or unavailable */ }
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      const raw = window.localStorage.getItem(STORAGE_PREFIX + key);
+      return raw ? JSON.parse(raw) : null;
+    }
+  } catch (e) { /* unavailable */ }
+  return null;
+}
+async function storageSet(key, value) {
+  try {
+    if (typeof window !== "undefined" && window.storage && typeof window.storage.set === "function") {
+      await window.storage.set(STORAGE_PREFIX + key, JSON.stringify(value), false);
+      return true;
+    }
+  } catch (e) { /* fall through to localStorage */ }
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value));
+      return true;
+    }
+  } catch (e) { /* unavailable */ }
+  return false;
+}
+async function storageClearAll(keys) {
+  for (const key of keys) {
+    try {
+      if (typeof window !== "undefined" && window.storage && typeof window.storage.delete === "function") {
+        await window.storage.delete(STORAGE_PREFIX + key, false);
+        continue;
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      if (typeof window !== "undefined" && window.localStorage) window.localStorage.removeItem(STORAGE_PREFIX + key);
+    } catch (e) { /* ignore */ }
+  }
+}
+
 function parseCSV(file, onDone) {
   Papa.parse(file, {
     header: true,
@@ -711,6 +759,49 @@ export default function MRPDashboard() {
     if (onlyWithOrders) setForceOpen(true);
   }, [onlyWithOrders]);
   const [loadedFlags, setLoadedFlags] = useState({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false });
+  const [hydrated, setHydrated] = useState(false);
+  const [hydrating, setHydrating] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [b, inv, dem, po, git, ac, hz, os] = await Promise.all([
+        storageGet("bom"), storageGet("inventory"), storageGet("demand"),
+        storageGet("poPending"), storageGet("git"), storageGet("actualConsumption"),
+        storageGet("horizon"), storageGet("orderStatus"),
+      ]);
+      if (cancelled) return;
+      if (b) { setBom(b); setLoadedFlags((f) => ({ ...f, bom: true })); }
+      if (inv) { setInventory(inv); setLoadedFlags((f) => ({ ...f, inventory: true })); }
+      if (dem) { setDemand(dem); setLoadedFlags((f) => ({ ...f, demand: true })); }
+      if (po) { setScheduledReceiptsPO(po); setLoadedFlags((f) => ({ ...f, poPending: true })); }
+      if (git) { setScheduledReceiptsGIT(git); setLoadedFlags((f) => ({ ...f, git: true })); }
+      if (ac) { setActualConsumption(ac); setLoadedFlags((f) => ({ ...f, actualConsumption: true })); }
+      if (hz) setHorizon(hz);
+      if (os) setOrderStatus(os);
+      setHydrating(false);
+      setHydrated(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => { if (hydrated) storageSet("bom", bom); }, [bom, hydrated]);
+  useEffect(() => { if (hydrated) storageSet("inventory", inventory); }, [inventory, hydrated]);
+  useEffect(() => { if (hydrated) storageSet("demand", demand); }, [demand, hydrated]);
+  useEffect(() => { if (hydrated) storageSet("poPending", scheduledReceiptsPO); }, [scheduledReceiptsPO, hydrated]);
+  useEffect(() => { if (hydrated) storageSet("git", scheduledReceiptsGIT); }, [scheduledReceiptsGIT, hydrated]);
+  useEffect(() => { if (hydrated) storageSet("actualConsumption", actualConsumption); }, [actualConsumption, hydrated]);
+  useEffect(() => { if (hydrated) storageSet("horizon", horizon); }, [horizon, hydrated]);
+  useEffect(() => { if (hydrated) storageSet("orderStatus", orderStatus); }, [orderStatus, hydrated]);
+
+  const PERSIST_KEYS = ["bom", "inventory", "demand", "poPending", "git", "actualConsumption", "horizon", "orderStatus"];
+  const clearSavedData = async () => {
+    await storageClearAll(PERSIST_KEYS);
+    setBom(SAMPLE_BOM); setInventory(SAMPLE_INVENTORY); setDemand(SAMPLE_DEMAND);
+    setScheduledReceiptsPO(SAMPLE_PO_PENDING); setScheduledReceiptsGIT(SAMPLE_GIT);
+    setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setHorizon(12); setOrderStatus({});
+    setLoadedFlags({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false });
+  };
 
   const handleFile = useCallback((key, setter) => (file) => {
     parseCSV(file, (rows) => {
@@ -819,6 +910,17 @@ export default function MRPDashboard() {
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft, letterSpacing: "0.06em" }}>RUN DATE</div>
           <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 700, color: COLORS.ink }}>
             {new Date().toISOString().slice(0, 10)}
+          </div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft, marginTop: 2 }}>
+            {hydrating ? "restoring last session\u2026" : (
+              <span>
+                data auto-saved{" "}
+                <button onClick={clearSavedData} style={{
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.rust,
+                  background: "transparent", border: "none", padding: 0, cursor: "pointer", textDecoration: "underline",
+                }}>clear</button>
+              </span>
+            )}
           </div>
         </div>
       </div>
