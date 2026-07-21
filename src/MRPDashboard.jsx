@@ -21,8 +21,8 @@ const SAMPLE_INVENTORY = [
   { item: "DRIVETRAIN-KIT", description: "Drivetrain kit", unit: "EA", on_hand: 25, lead_time_weeks: 2, lot_size: 15, safety_stock: 6, safety_factor: 1, expiry_date: "" },
   { item: "RIM-26", description: "26in alloy rim", unit: "EA", on_hand: 60, lead_time_weeks: 2, lot_size: 50, safety_stock: 20, safety_factor: 1, expiry_date: "" },
   { item: "HUB-STD", description: "Standard hub", unit: "EA", on_hand: 45, lead_time_weeks: 2, lot_size: 40, safety_stock: 15, safety_factor: 1, expiry_date: "" },
-  { item: "SPOKE-STD", description: "Steel spoke", unit: "PCS", on_hand: 900, lead_time_weeks: 1, lot_size: 1000, safety_stock: 300, safety_factor: 1, expiry_date: "2026-07-15" },
-  { item: "CHAIN-STD", description: "Standard chain, pre-lubed", unit: "EA", on_hand: 20, lead_time_weeks: 4, lot_size: 25, safety_stock: 10, safety_factor: 1.5, expiry_date: "2026-07-30" },
+  { item: "SPOKE-STD", description: "Steel spoke", unit: "PCS", on_hand: 900, lead_time_weeks: 1, lot_size: 1000, safety_stock: 300, safety_factor: 1, expiry_date: "" },
+  { item: "CHAIN-STD", description: "Standard chain, pre-lubed", unit: "EA", on_hand: 20, lead_time_weeks: 4, lot_size: 25, safety_stock: 10, safety_factor: 1.5, expiry_date: "" },
   { item: "CRANKSET", description: "Crankset, forged", unit: "EA", on_hand: 18, lead_time_weeks: 4, lot_size: 20, safety_stock: 8, safety_factor: 1, expiry_date: "" },
 ];
 
@@ -50,13 +50,21 @@ const SAMPLE_ACTUAL_CONSUMPTION = [
   { item: "SPOKE-STD", week: 3, quantity: 260 },
 ];
 
+const SAMPLE_BATCHES = [
+  { item: "SPOKE-STD", batch_no: "SPK-B1", quantity: 300, expiry_date: "2026-07-01" },
+  { item: "SPOKE-STD", batch_no: "SPK-B2", quantity: 600, expiry_date: "2026-11-01" },
+  { item: "CHAIN-STD", batch_no: "CHN-B1", quantity: 8, expiry_date: "2026-07-28" },
+  { item: "CHAIN-STD", batch_no: "CHN-B2", quantity: 12, expiry_date: "2026-12-01" },
+];
+
 const REQUIRED_COLS = {
   bom: ["parent_item", "component_item", "qty_per"],
-  inventory: ["item", "on_hand", "lead_time_weeks", "lot_size", "safety_stock", "safety_factor", "description", "unit", "expiry_date"],
+  inventory: ["item", "on_hand", "lead_time_weeks", "lot_size", "safety_stock", "safety_factor", "description", "unit", "expiry_date (optional, if no batch file)"],
   demand: ["item", "week", "quantity"],
   poPending: ["item", "week", "quantity"],
   git: ["item", "week", "quantity"],
   actualConsumption: ["item", "week", "quantity"],
+  batches: ["item", "batch_no", "quantity", "expiry_date"],
 };
 
 function toNum(v, fallback = 0) {
@@ -105,7 +113,7 @@ function parseWeekToIndex(weekValue, startMonday) {
 }
 
 // ---------- MRP engine ----------
-function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, horizon }) {
+function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, batches, horizon }) {
   const weeks = Array.from({ length: horizon }, (_, i) => i + 1);
   const invByItem = {};
   inventory.forEach((r) => (invByItem[r.item] = r));
@@ -189,6 +197,21 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, hor
     if (idx >= 0 && idx < horizon) actualByItem[r.item][idx] += toNum(r.quantity);
   });
 
+  const batchesByItem = {};
+  (batches || []).forEach((r) => {
+    const qty = toNum(r.quantity);
+    const dateStr = (r.expiry_date || "").trim();
+    const expiryDate = dateStr ? new Date(dateStr + "T00:00:00Z") : null;
+    const valid = expiryDate && !isNaN(expiryDate);
+    const weeksToExpiry = valid ? Math.floor((expiryDate - startMonday) / (7 * 86400000)) : null;
+    batchesByItem[r.item] = batchesByItem[r.item] || [];
+    batchesByItem[r.item].push({
+      batchNo: r.batch_no || "?", quantity: qty, expiryDate: dateStr,
+      weeksToExpiry, expired: valid ? weeksToExpiry < 0 : false, expiringSoon: valid ? (weeksToExpiry >= 0 && weeksToExpiry <= 4) : false,
+    });
+  });
+  Object.values(batchesByItem).forEach((list) => list.sort((a, b) => (a.weeksToExpiry ?? Infinity) - (b.weeksToExpiry ?? Infinity)));
+
   const records = {};
 
   order.forEach((item) => {
@@ -199,20 +222,35 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, hor
     const safetyFactor = toNum(inv.safety_factor, 1) || 1;
     const safety = baseSafety * safetyFactor;
 
-    const rawOnHand = toNum(inv.on_hand, 0);
-    let expired = false;
-    let expiringSoon = false;
-    let weeksToExpiry = null;
-    const expiryDateStr = (inv.expiry_date || "").trim();
-    if (expiryDateStr) {
-      const expiryDate = new Date(expiryDateStr + "T00:00:00Z");
-      if (!isNaN(expiryDate)) {
-        weeksToExpiry = Math.floor((expiryDate - startMonday) / (7 * 86400000));
-        expired = weeksToExpiry < 0;
-        expiringSoon = !expired && weeksToExpiry <= 4;
+    const itemBatches = batchesByItem[item] || [];
+    let rawOnHand, effectiveOnHand, expired, expiringSoon, weeksToExpiry, expiryDateStr;
+
+    if (itemBatches.length > 0) {
+      // batch-tracked item: usable stock = sum of non-expired batches (FEFO)
+      rawOnHand = itemBatches.reduce((s, b) => s + b.quantity, 0);
+      effectiveOnHand = itemBatches.filter((b) => !b.expired).reduce((s, b) => s + b.quantity, 0);
+      expired = effectiveOnHand === 0 && rawOnHand > 0;
+      expiringSoon = itemBatches.some((b) => !b.expired && b.expiringSoon);
+      const nearest = itemBatches.find((b) => !b.expired);
+      weeksToExpiry = nearest ? nearest.weeksToExpiry : null;
+      expiryDateStr = nearest ? nearest.expiryDate : (itemBatches[0] ? itemBatches[0].expiryDate : "");
+    } else {
+      // legacy single expiry_date on Inventory Master (optional)
+      rawOnHand = toNum(inv.on_hand, 0);
+      expired = false;
+      expiringSoon = false;
+      weeksToExpiry = null;
+      expiryDateStr = (inv.expiry_date || "").trim();
+      if (expiryDateStr) {
+        const expiryDate = new Date(expiryDateStr + "T00:00:00Z");
+        if (!isNaN(expiryDate)) {
+          weeksToExpiry = Math.floor((expiryDate - startMonday) / (7 * 86400000));
+          expired = weeksToExpiry < 0;
+          expiringSoon = !expired && weeksToExpiry <= 4;
+        }
       }
+      effectiveOnHand = expired ? 0 : rawOnHand;
     }
-    const effectiveOnHand = expired ? 0 : rawOnHand;
 
     const gr = grossReq[item] || new Array(horizon).fill(0);
     const sr = schedReceiptByItem[item] || new Array(horizon).fill(0);
@@ -268,6 +306,9 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, hor
       baseSafety,
       safetyFactor,
       onHand: rawOnHand,
+      usableOnHand: effectiveOnHand,
+      expiredQty: Math.max(0, rawOnHand - effectiveOnHand),
+      batches: itemBatches,
       expiryDate: expiryDateStr,
       expired,
       expiringSoon,
@@ -523,7 +564,9 @@ function RecordGrid({ rec, weeks, weekLabels }) {
           ["LOW-LEVEL CODE", rec.level],
           ["LEAD TIME (WK)", rec.leadTime],
           ["LOT SIZE / SS", `${rec.lotSize} / ${rec.baseSafety}${rec.safetyFactor !== 1 ? ` \u00d7${rec.safetyFactor} = ${rec.safety}` : ""}`],
-          ["EXPIRY", rec.expiryDate ? (rec.expired ? "EXPIRED" : rec.expiryDate) : "\u2014"],
+          ["EXPIRY", rec.batches.length > 0
+            ? `${rec.batches.length} batch${rec.batches.length === 1 ? "" : "es"}${rec.expired ? " (ALL EXPIRED)" : rec.expiredQty > 0 ? ` (${rec.expiredQty} exp.)` : ""}`
+            : (rec.expiryDate ? (rec.expired ? "EXPIRED" : rec.expiryDate) : "\u2014")],
         ].map(([k, v], i) => (
           <div key={k} style={{
             padding: "6px 10px", borderRight: i < 5 ? `1px solid ${COLORS.paperLine}` : "none",
@@ -542,15 +585,52 @@ function RecordGrid({ rec, weeks, weekLabels }) {
           <Layers size={11} /> common component — used in {rec.parentsCount} assemblies: {rec.parentItems.join(", ")}
         </div>
       )}
-      {rec.expired && (
-        <div style={{ padding: "0 10px 8px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.rust, display: "flex", alignItems: "center", gap: 4 }}>
-          <CalendarX size={11} /> on-hand ({rec.onHand} {rec.unit}) expired {rec.expiryDate} — excluded from planning, treated as 0
+      {rec.batches.length > 0 ? (
+        <div style={{ padding: "0 10px 8px" }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.steel, display: "flex", alignItems: "center", gap: 4, marginBottom: 4 }}>
+            <CalendarX size={11} /> batch breakdown (FEFO order) — usable {rec.usableOnHand} / total {rec.onHand} {rec.unit}
+            {rec.expiredQty > 0 && <span style={{ color: COLORS.rust }}>&nbsp;{"\u00b7"} {rec.expiredQty} {rec.unit} expired, excluded</span>}
+          </div>
+          <table style={{ borderCollapse: "collapse", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, width: "100%", maxWidth: 480 }}>
+            <thead>
+              <tr style={{ color: COLORS.inkSoft }}>
+                <td style={{ padding: "2px 8px 2px 0", textAlign: "left" }}>BATCH</td>
+                <td style={{ padding: "2px 8px" }}>QTY</td>
+                <td style={{ padding: "2px 8px" }}>EXPIRY</td>
+                <td style={{ padding: "2px 0" }}>STATUS</td>
+              </tr>
+            </thead>
+            <tbody>
+              {rec.batches.map((b) => (
+                <tr key={b.batchNo}>
+                  <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{b.batchNo}</td>
+                  <td style={{ padding: "2px 8px" }}>{b.quantity}</td>
+                  <td style={{ padding: "2px 8px" }}>{b.expiryDate || "\u2014"}</td>
+                  <td style={{ padding: "2px 0" }}>
+                    <span style={{
+                      fontSize: 9.5, padding: "1px 5px",
+                      color: b.expired ? "#fff" : b.expiringSoon ? COLORS.amber : COLORS.moss,
+                      background: b.expired ? COLORS.rust : b.expiringSoon ? "#F3DDBC" : "#E3E9D6",
+                    }}>{b.expired ? "EXPIRED" : b.expiringSoon ? `${b.weeksToExpiry}w left` : "OK"}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
-      )}
-      {!rec.expired && rec.expiringSoon && (
-        <div style={{ padding: "0 10px 8px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.amber, display: "flex", alignItems: "center", gap: 4 }}>
-          <CalendarX size={11} /> expires {rec.expiryDate} — {rec.weeksToExpiry} week{rec.weeksToExpiry === 1 ? "" : "s"} from now
-        </div>
+      ) : (
+        <>
+          {rec.expired && (
+            <div style={{ padding: "0 10px 8px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.rust, display: "flex", alignItems: "center", gap: 4 }}>
+              <CalendarX size={11} /> on-hand ({rec.onHand} {rec.unit}) expired {rec.expiryDate} — excluded from planning, treated as 0
+            </div>
+          )}
+          {!rec.expired && rec.expiringSoon && (
+            <div style={{ padding: "0 10px 8px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.amber, display: "flex", alignItems: "center", gap: 4 }}>
+              <CalendarX size={11} /> expires {rec.expiryDate} — {rec.weeksToExpiry} week{rec.weeksToExpiry === 1 ? "" : "s"} from now
+            </div>
+          )}
+        </>
       )}
       <div style={{ overflowX: "auto" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 }}>
@@ -749,6 +829,7 @@ export default function MRPDashboard() {
   const [scheduledReceiptsPO, setScheduledReceiptsPO] = useState(SAMPLE_PO_PENDING);
   const [scheduledReceiptsGIT, setScheduledReceiptsGIT] = useState(SAMPLE_GIT);
   const [actualConsumption, setActualConsumption] = useState(SAMPLE_ACTUAL_CONSUMPTION);
+  const [batches, setBatches] = useState(SAMPLE_BATCHES);
   const [orderStatus, setOrderStatus] = useState({}); // key: "item::releaseWeek" -> { status, poNumber }
   const [horizon, setHorizon] = useState(12);
   const [selected, setSelected] = useState("BIKE-100");
@@ -758,17 +839,17 @@ export default function MRPDashboard() {
   useEffect(() => {
     if (onlyWithOrders) setForceOpen(true);
   }, [onlyWithOrders]);
-  const [loadedFlags, setLoadedFlags] = useState({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false });
+  const [loadedFlags, setLoadedFlags] = useState({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
   const [hydrated, setHydrated] = useState(false);
   const [hydrating, setHydrating] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [b, inv, dem, po, git, ac, hz, os] = await Promise.all([
+      const [b, inv, dem, po, git, ac, bt, hz, os] = await Promise.all([
         storageGet("bom"), storageGet("inventory"), storageGet("demand"),
         storageGet("poPending"), storageGet("git"), storageGet("actualConsumption"),
-        storageGet("horizon"), storageGet("orderStatus"),
+        storageGet("batches"), storageGet("horizon"), storageGet("orderStatus"),
       ]);
       if (cancelled) return;
       if (b) { setBom(b); setLoadedFlags((f) => ({ ...f, bom: true })); }
@@ -777,6 +858,7 @@ export default function MRPDashboard() {
       if (po) { setScheduledReceiptsPO(po); setLoadedFlags((f) => ({ ...f, poPending: true })); }
       if (git) { setScheduledReceiptsGIT(git); setLoadedFlags((f) => ({ ...f, git: true })); }
       if (ac) { setActualConsumption(ac); setLoadedFlags((f) => ({ ...f, actualConsumption: true })); }
+      if (bt) { setBatches(bt); setLoadedFlags((f) => ({ ...f, batches: true })); }
       if (hz) setHorizon(hz);
       if (os) setOrderStatus(os);
       setHydrating(false);
@@ -791,16 +873,17 @@ export default function MRPDashboard() {
   useEffect(() => { if (hydrated) storageSet("poPending", scheduledReceiptsPO); }, [scheduledReceiptsPO, hydrated]);
   useEffect(() => { if (hydrated) storageSet("git", scheduledReceiptsGIT); }, [scheduledReceiptsGIT, hydrated]);
   useEffect(() => { if (hydrated) storageSet("actualConsumption", actualConsumption); }, [actualConsumption, hydrated]);
+  useEffect(() => { if (hydrated) storageSet("batches", batches); }, [batches, hydrated]);
   useEffect(() => { if (hydrated) storageSet("horizon", horizon); }, [horizon, hydrated]);
   useEffect(() => { if (hydrated) storageSet("orderStatus", orderStatus); }, [orderStatus, hydrated]);
 
-  const PERSIST_KEYS = ["bom", "inventory", "demand", "poPending", "git", "actualConsumption", "horizon", "orderStatus"];
+  const PERSIST_KEYS = ["bom", "inventory", "demand", "poPending", "git", "actualConsumption", "batches", "horizon", "orderStatus"];
   const clearSavedData = async () => {
     await storageClearAll(PERSIST_KEYS);
     setBom(SAMPLE_BOM); setInventory(SAMPLE_INVENTORY); setDemand(SAMPLE_DEMAND);
     setScheduledReceiptsPO(SAMPLE_PO_PENDING); setScheduledReceiptsGIT(SAMPLE_GIT);
-    setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setHorizon(12); setOrderStatus({});
-    setLoadedFlags({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false });
+    setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setBatches(SAMPLE_BATCHES); setHorizon(12); setOrderStatus({});
+    setLoadedFlags({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
   };
 
   const handleFile = useCallback((key, setter) => (file) => {
@@ -811,8 +894,8 @@ export default function MRPDashboard() {
   }, []);
 
   const { weeks, weekLabels, records, order, childrenOf } = useMemo(
-    () => runMRP({ bom, inventory, demand, poPending: scheduledReceiptsPO, git: scheduledReceiptsGIT, actualConsumption, horizon }),
-    [bom, inventory, demand, scheduledReceiptsPO, scheduledReceiptsGIT, actualConsumption, horizon]
+    () => runMRP({ bom, inventory, demand, poPending: scheduledReceiptsPO, git: scheduledReceiptsGIT, actualConsumption, batches, horizon }),
+    [bom, inventory, demand, scheduledReceiptsPO, scheduledReceiptsGIT, actualConsumption, batches, horizon]
   );
 
   const topItems = useMemo(() => order.filter((it) => !records[it].hasParents), [order, records]);
@@ -939,6 +1022,9 @@ export default function MRPDashboard() {
         <UploadSlot label="Actual Consumption (\u0e40\u0e1a\u0e34\u0e01\u0e08\u0e23\u0e34\u0e07)" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity"
           onFile={handleFile("actualConsumption", setActualConsumption)} loaded={loadedFlags.actualConsumption} count={actualConsumption.length}
           onSample={() => { setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setLoadedFlags((f) => ({ ...f, actualConsumption: false })); }} />
+        <UploadSlot label="Batches / Lots (expiry)" hint="item, batch_no, quantity, expiry_date"
+          onFile={handleFile("batches", setBatches)} loaded={loadedFlags.batches} count={batches.length}
+          onSample={() => { setBatches(SAMPLE_BATCHES); setLoadedFlags((f) => ({ ...f, batches: false })); }} />
         <UploadSlot label="PO Pending" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity"
           onFile={handleFile("poPending", setScheduledReceiptsPO)} loaded={loadedFlags.poPending} count={scheduledReceiptsPO.length}
           onSample={() => { setScheduledReceiptsPO(SAMPLE_PO_PENDING); setLoadedFlags((f) => ({ ...f, poPending: false })); }} />
