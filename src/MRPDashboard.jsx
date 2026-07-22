@@ -15,15 +15,15 @@ const SAMPLE_BOM = [
 ];
 
 const SAMPLE_INVENTORY = [
-  { item: "BIKE-100", description: "Complete bicycle", unit: "EA", on_hand: 12, lead_time_weeks: 1, lot_size: 1, safety_stock: 5, safety_factor: 1, expiry_date: "" },
-  { item: "FRAME-STD", description: "Standard frame, welded", unit: "EA", on_hand: 40, lead_time_weeks: 3, lot_size: 20, safety_stock: 10, safety_factor: 1.2, expiry_date: "" },
-  { item: "WHEEL-ASM", description: "Wheel assembly, built", unit: "EA", on_hand: 30, lead_time_weeks: 2, lot_size: 10, safety_stock: 8, safety_factor: 1, expiry_date: "" },
-  { item: "DRIVETRAIN-KIT", description: "Drivetrain kit", unit: "EA", on_hand: 25, lead_time_weeks: 2, lot_size: 15, safety_stock: 6, safety_factor: 1, expiry_date: "" },
-  { item: "RIM-26", description: "26in alloy rim", unit: "EA", on_hand: 60, lead_time_weeks: 2, lot_size: 50, safety_stock: 20, safety_factor: 1, expiry_date: "" },
-  { item: "HUB-STD", description: "Standard hub", unit: "EA", on_hand: 45, lead_time_weeks: 2, lot_size: 40, safety_stock: 15, safety_factor: 1, expiry_date: "" },
-  { item: "SPOKE-STD", description: "Steel spoke", unit: "PCS", on_hand: 900, lead_time_weeks: 1, lot_size: 1000, safety_stock: 300, safety_factor: 1, expiry_date: "" },
-  { item: "CHAIN-STD", description: "Standard chain, pre-lubed", unit: "EA", on_hand: 20, lead_time_weeks: 4, lot_size: 25, safety_stock: 10, safety_factor: 1.5, expiry_date: "" },
-  { item: "CRANKSET", description: "Crankset, forged", unit: "EA", on_hand: 18, lead_time_weeks: 4, lot_size: 20, safety_stock: 8, safety_factor: 1, expiry_date: "" },
+  { item: "BIKE-100", description: "Complete bicycle", unit: "EA", vendor: "", on_hand: 12, lead_time_weeks: 1, lot_size: 1, safety_stock: 5, safety_factor: 1, expiry_date: "" },
+  { item: "FRAME-STD", description: "Standard frame, welded", unit: "EA", vendor: "Apex Metal Works", on_hand: 40, lead_time_weeks: 3, lot_size: 20, safety_stock: 10, safety_factor: 1.2, expiry_date: "" },
+  { item: "WHEEL-ASM", description: "Wheel assembly, built", unit: "EA", vendor: "SpinCraft Wheels Co.", on_hand: 30, lead_time_weeks: 2, lot_size: 10, safety_stock: 8, safety_factor: 1, expiry_date: "" },
+  { item: "DRIVETRAIN-KIT", description: "Drivetrain kit", unit: "EA", vendor: "GearForge Ltd.", on_hand: 25, lead_time_weeks: 2, lot_size: 15, safety_stock: 6, safety_factor: 1, expiry_date: "" },
+  { item: "RIM-26", description: "26in alloy rim", unit: "EA", vendor: "Apex Metal Works", on_hand: 60, lead_time_weeks: 2, lot_size: 50, safety_stock: 20, safety_factor: 1, expiry_date: "" },
+  { item: "HUB-STD", description: "Standard hub", unit: "EA", vendor: "SpinCraft Wheels Co.", on_hand: 45, lead_time_weeks: 2, lot_size: 40, safety_stock: 15, safety_factor: 1, expiry_date: "" },
+  { item: "SPOKE-STD", description: "Steel spoke", unit: "PCS", vendor: "Apex Metal Works", on_hand: 900, lead_time_weeks: 1, lot_size: 1000, safety_stock: 300, safety_factor: 1, expiry_date: "" },
+  { item: "CHAIN-STD", description: "Standard chain, pre-lubed", unit: "EA", vendor: "GearForge Ltd.", on_hand: 20, lead_time_weeks: 4, lot_size: 25, safety_stock: 10, safety_factor: 1.5, expiry_date: "" },
+  { item: "CRANKSET", description: "Crankset, forged", unit: "EA", vendor: "GearForge Ltd.", on_hand: 18, lead_time_weeks: 4, lot_size: 20, safety_stock: 8, safety_factor: 1, expiry_date: "" },
 ];
 
 const SAMPLE_DEMAND = [
@@ -36,8 +36,8 @@ const SAMPLE_DEMAND = [
 ];
 
 const SAMPLE_PO_PENDING = [
-  { item: "CHAIN-STD", week: 2, quantity: 25, po_number: "TPO4471" },
-  { item: "WHEEL-ASM", week: 1, quantity: 10, po_number: "TPO4455" },
+  { item: "CHAIN-STD", week: 2, quantity: 25, po_number: "TPO4471", vendor: "Shimano Trading Co." },
+  { item: "WHEEL-ASM", week: 1, quantity: 10, po_number: "TPO4455", vendor: "Taiwan Wheel Works" },
 ];
 
 const SAMPLE_GIT = [
@@ -59,9 +59,9 @@ const SAMPLE_BATCHES = [
 
 const REQUIRED_COLS = {
   bom: ["parent_item", "component_item", "qty_per"],
-  inventory: ["item", "on_hand", "lead_time_weeks", "lot_size", "safety_stock", "safety_factor", "description", "unit", "expiry_date (optional, if no batch file)"],
+  inventory: ["item", "on_hand", "lead_time_weeks", "lot_size", "safety_stock", "safety_factor", "description", "unit", "vendor", "expiry_date (optional, if no batch file)"],
   demand: ["item", "week", "quantity"],
-  poPending: ["item", "week", "quantity", "po_number"],
+  poPending: ["item", "week", "quantity", "po_number", "vendor"],
   git: ["item", "quantity"],
   actualConsumption: ["item", "week", "quantity"],
   batches: ["item", "batch_no", "quantity", "expiry_date"],
@@ -217,7 +217,9 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       schedReceiptByItem[r.item][idx] += toNum(r.quantity);
       poDetailsByItem[r.item] = poDetailsByItem[r.item] || [];
       poDetailsByItem[r.item].push({
-        poNumber: getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]) || "?", quantity: toNum(r.quantity), weekIdx: idx,
+        poNumber: getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]) || "?",
+        vendor: getField(r, ["vendor", "vendorname", "supplier", "suppliername", "seller"], ["vendor", "supplier", "seller"]) || "",
+        quantity: toNum(r.quantity), weekIdx: idx,
         weekLabel: weekLabels[idx], mondayDate: weekMondayDates[idx],
       });
     }
@@ -341,6 +343,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       item,
       description: inv.description || item,
       unit: inv.unit || "EA",
+      vendor: (inv.vendor || "").trim(),
       level: level[item] || 0,
       leadTime,
       lotSize,
@@ -581,6 +584,70 @@ function TreeRow({ item, records, childrenOf, selected, onSelect, depth, onlyWit
   );
 }
 
+function VendorGroupRow({ vendor, items, records, selected, onSelect, onlyWithOrders, forceOpen, clearForce }) {
+  const [open, setOpen] = useState(true);
+  const effectiveOpen = forceOpen !== null ? forceOpen : open;
+  const visibleItems = onlyWithOrders ? items.filter((it) => records[it].plannedRelease.some((v) => v > 0)) : items;
+  if (onlyWithOrders && visibleItems.length === 0) return null;
+  const anyCritical = visibleItems.some((it) => records[it].pastDue.some(Boolean));
+  const anyShortage = visibleItems.some((it) => records[it].plannedRelease.some((v) => v > 0));
+
+  return (
+    <div>
+      <div
+        onClick={() => { setOpen(!effectiveOpen); if (forceOpen !== null) clearForce(); }}
+        style={{
+          display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
+          padding: "5px 6px", background: COLORS.paper, borderLeft: `3px solid ${COLORS.steel}`,
+        }}
+      >
+        {effectiveOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 11.5, fontWeight: 700, color: COLORS.ink, flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {vendor} <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 400, color: COLORS.inkSoft, fontSize: 10.5 }}>({visibleItems.length})</span>
+        </span>
+        {anyCritical && <CircleAlert size={12} color={COLORS.rust} />}
+        {!anyCritical && anyShortage && <AlertTriangle size={11} color={COLORS.amber} />}
+      </div>
+      {effectiveOpen && visibleItems.map((it) => {
+        const rec = records[it];
+        const isSelected = selected === it;
+        const critical = rec.pastDue.some(Boolean);
+        const shortage = rec.plannedRelease.some((v) => v > 0);
+        return (
+          <div key={it} onClick={() => onSelect(it)} title={`${rec.description} (${rec.unit})`} style={{
+            display: "flex", flexDirection: "column", cursor: "pointer",
+            paddingLeft: 22, paddingRight: 6, paddingTop: 4, paddingBottom: 4,
+            background: isSelected ? COLORS.steel : "transparent",
+            color: isSelected ? "#F4F4EE" : COLORS.ink,
+            borderLeft: isSelected ? `3px solid ${COLORS.amber}` : "3px solid transparent",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{it}</span>
+              {critical && <CircleAlert size={12} color={isSelected ? "#FFD9CE" : COLORS.rust} />}
+              {!critical && shortage && <AlertTriangle size={11} color={isSelected ? "#FFE9C6" : COLORS.amber} />}
+            </div>
+            <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, paddingLeft: 17, color: isSelected ? "#DCE3E9" : COLORS.inkSoft, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {rec.description} {"\u00b7"} {rec.unit}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function VendorGroupTree({ groups, records, selected, onSelect, onlyWithOrders, forceOpen, clearForce }) {
+  return (
+    <div>
+      {groups.map((g) => (
+        <VendorGroupRow key={g.vendor} vendor={g.vendor} items={g.items} records={records}
+          selected={selected} onSelect={onSelect} onlyWithOrders={onlyWithOrders}
+          forceOpen={forceOpen} clearForce={clearForce} />
+      ))}
+    </div>
+  );
+}
+
 function RecordGrid({ rec, weeks, weekLabels, weekDates }) {
   if (!rec) return null;
   const rows = [
@@ -623,7 +690,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates }) {
         ))}
       </div>
       <div style={{ padding: "8px 10px 2px", fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 600, color: COLORS.ink }}>
-        {rec.description} <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 400, color: COLORS.inkSoft }}>({rec.unit})</span>
+        {rec.description} <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 400, color: COLORS.inkSoft }}>({rec.unit}){rec.vendor ? ` \u00b7 ${rec.vendor}` : ""}</span>
       </div>
       {rec.parentsCount > 1 && (
         <div style={{ padding: "0 10px 8px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.steel, display: "flex", alignItems: "center", gap: 4 }}>
@@ -686,6 +753,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates }) {
             <thead>
               <tr style={{ color: COLORS.inkSoft }}>
                 <td style={{ padding: "2px 8px 2px 0", textAlign: "left" }}>PO #</td>
+                <td style={{ padding: "2px 8px", textAlign: "left" }}>VENDOR</td>
                 <td style={{ padding: "2px 8px" }}>QTY</td>
                 <td style={{ padding: "2px 8px" }}>DUE WK</td>
                 <td style={{ padding: "2px 0" }}>DATE (MON)</td>
@@ -695,6 +763,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates }) {
               {rec.poPendingDetails.map((p, i) => (
                 <tr key={`${p.poNumber}-${i}`}>
                   <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{p.poNumber}</td>
+                  <td style={{ padding: "2px 8px", color: COLORS.inkSoft }}>{p.vendor || "\u2014"}</td>
                   <td style={{ padding: "2px 8px" }}>{p.quantity}</td>
                   <td style={{ padding: "2px 8px" }}>{p.weekLabel}</td>
                   <td style={{ padding: "2px 0" }}>{p.mondayDate}</td>
@@ -990,6 +1059,21 @@ export default function MRPDashboard() {
     return matched ? null : headers;
   }, [scheduledReceiptsPO]);
 
+  const vendorGroups = useMemo(() => {
+    const map = {};
+    order.forEach((it) => {
+      const v = records[it].vendor || "Unassigned";
+      map[v] = map[v] || [];
+      map[v].push(it);
+    });
+    const vendors = Object.keys(map).sort((a, b) => {
+      if (a === "Unassigned") return 1;
+      if (b === "Unassigned") return -1;
+      return a.localeCompare(b);
+    });
+    return vendors.map((v) => ({ vendor: v, items: map[v].sort() }));
+  }, [order, records]);
+
   const topItems = useMemo(() => order.filter((it) => !records[it].hasParents), [order, records]);
 
   const usedInMap = useMemo(() => {
@@ -1025,7 +1109,7 @@ export default function MRPDashboard() {
   const subtreeOrderMap = useMemo(() => computeSubtreeOrder([...order].reverse(), childrenOf), [order, records, childrenOf]);
   const reversedSubtreeOrderMap = useMemo(() => computeSubtreeOrder(order, usedInMap), [order, records, usedInMap]);
 
-  const activeTopItems = viewMode === "assembly" ? topItems : rawMaterialRoots;
+  const activeTopItems = viewMode === "assembly" ? topItems : viewMode === "material" ? rawMaterialRoots : [];
   const activeChildMap = viewMode === "assembly" ? childrenOf : usedInMap;
   const activeOrderMap = viewMode === "assembly" ? subtreeOrderMap : reversedSubtreeOrderMap;
 
@@ -1105,7 +1189,7 @@ export default function MRPDashboard() {
         <UploadSlot label="Bill of Materials" hint="parent_item, component_item, qty_per"
           onFile={handleFile("bom", setBom)} loaded={loadedFlags.bom} count={bom.length}
           onSample={() => { setBom(SAMPLE_BOM); setLoadedFlags((f) => ({ ...f, bom: false })); }} />
-        <UploadSlot label="Inventory Master" hint="item, on_hand, lead_time_weeks, lot_size, safety_stock, safety_factor, expiry_date"
+        <UploadSlot label="Inventory Master" hint="item, on_hand, lead_time_weeks, lot_size, safety_stock, safety_factor, vendor, expiry_date"
           onFile={handleFile("inventory", setInventory)} loaded={loadedFlags.inventory} count={inventory.length}
           onSample={() => { setInventory(SAMPLE_INVENTORY); setLoadedFlags((f) => ({ ...f, inventory: false })); }} />
         <UploadSlot label="Demand Schedule" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity"
@@ -1117,7 +1201,7 @@ export default function MRPDashboard() {
         <UploadSlot label="Batches / Lots (expiry)" hint="item, batch_no, quantity, expiry_date"
           onFile={handleFile("batches", setBatches)} loaded={loadedFlags.batches} count={batches.length}
           onSample={() => { setBatches(SAMPLE_BATCHES); setLoadedFlags((f) => ({ ...f, batches: false })); }} />
-        <UploadSlot label="PO Pending" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity, po_number"
+        <UploadSlot label="PO Pending" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity, po_number, vendor"
           onFile={handleFile("poPending", setScheduledReceiptsPO)} loaded={loadedFlags.poPending} count={scheduledReceiptsPO.length}
           onSample={() => { setScheduledReceiptsPO(SAMPLE_PO_PENDING); setLoadedFlags((f) => ({ ...f, poPending: false })); }} />
         <UploadSlot label="GIT (Goods In Transit)" hint="item, quantity (arrives this week, no date needed)"
@@ -1166,7 +1250,7 @@ export default function MRPDashboard() {
               display: "flex", alignItems: "center", gap: 6, fontFamily: "'Space Grotesk', sans-serif",
               fontSize: 12, fontWeight: 700, letterSpacing: "0.04em", color: COLORS.ink, textTransform: "uppercase",
             }}>
-              <PackageSearch size={14} color={COLORS.steel} /> {viewMode === "assembly" ? "Item Structure" : "Where-Used"}
+              <PackageSearch size={14} color={COLORS.steel} /> {viewMode === "assembly" ? "Item Structure" : viewMode === "material" ? "Where-Used" : "By Vendor"}
             </span>
             <label style={{
               display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
@@ -1178,12 +1262,12 @@ export default function MRPDashboard() {
             </label>
           </div>
           <div style={{ display: "flex", borderBottom: `1px solid ${COLORS.paperLine}` }}>
-            {[["assembly", "Finished good \u2192 parts"], ["material", "Raw material \u2192 where-used"]].map(([mode, label]) => (
+            {[["assembly", "Finished good \u2192 parts"], ["material", "Raw material \u2192 where-used"], ["vendor", "By vendor"]].map(([mode, label]) => (
               <button key={mode} onClick={() => setViewMode(mode)} style={{
-                flex: 1, padding: "6px 8px", cursor: "pointer", border: "none",
+                flex: 1, padding: "6px 6px", cursor: "pointer", border: "none",
                 background: viewMode === mode ? COLORS.steel : "transparent",
                 color: viewMode === mode ? "#F4F4EE" : COLORS.inkSoft,
-                fontFamily: "'IBM Plex Mono', monospace", fontSize: 10,
+                fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5,
               }}>{label}</button>
             ))}
           </div>
@@ -1200,16 +1284,23 @@ export default function MRPDashboard() {
             }}><ChevronsUp size={11} /> collapse all</button>
           </div>
           <div style={{ padding: "6px 2px", maxHeight: 480, overflowY: "auto" }}>
-            {visibleTopItems.map((it) => (
-              <TreeRow key={it} item={it} records={records} childrenOf={activeChildMap}
-                selected={selected} onSelect={setSelected} depth={0}
-                onlyWithOrders={onlyWithOrders} subtreeOrderMap={activeOrderMap}
-                forceOpen={forceOpen} clearForce={() => setForceOpen(null)} />
-            ))}
-            {onlyWithOrders && visibleTopItems.length === 0 && (
-              <div style={{ padding: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.inkSoft, textAlign: "center" }}>
-                No items need a planned order in this horizon.
-              </div>
+            {viewMode === "vendor" ? (
+              <VendorGroupTree groups={vendorGroups} records={records} selected={selected} onSelect={setSelected}
+                onlyWithOrders={onlyWithOrders} forceOpen={forceOpen} clearForce={() => setForceOpen(null)} />
+            ) : (
+              <>
+                {visibleTopItems.map((it) => (
+                  <TreeRow key={it} item={it} records={records} childrenOf={activeChildMap}
+                    selected={selected} onSelect={setSelected} depth={0}
+                    onlyWithOrders={onlyWithOrders} subtreeOrderMap={activeOrderMap}
+                    forceOpen={forceOpen} clearForce={() => setForceOpen(null)} />
+                ))}
+                {onlyWithOrders && visibleTopItems.length === 0 && (
+                  <div style={{ padding: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.inkSoft, textAlign: "center" }}>
+                    No items need a planned order in this horizon.
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
