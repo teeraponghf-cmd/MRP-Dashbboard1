@@ -36,8 +36,8 @@ const SAMPLE_DEMAND = [
 ];
 
 const SAMPLE_PO_PENDING = [
-  { item: "CHAIN-STD", week: 2, quantity: 25 },
-  { item: "WHEEL-ASM", week: 1, quantity: 10 },
+  { item: "CHAIN-STD", week: 2, quantity: 25, po_number: "PO-4471" },
+  { item: "WHEEL-ASM", week: 1, quantity: 10, po_number: "PO-4455" },
 ];
 
 const SAMPLE_GIT = [
@@ -61,7 +61,7 @@ const REQUIRED_COLS = {
   bom: ["parent_item", "component_item", "qty_per"],
   inventory: ["item", "on_hand", "lead_time_weeks", "lot_size", "safety_stock", "safety_factor", "description", "unit", "expiry_date (optional, if no batch file)"],
   demand: ["item", "week", "quantity"],
-  poPending: ["item", "week", "quantity"],
+  poPending: ["item", "week", "quantity", "po_number"],
   git: ["item", "quantity"],
   actualConsumption: ["item", "week", "quantity"],
   batches: ["item", "batch_no", "quantity", "expiry_date"],
@@ -170,6 +170,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     poPendingByItem[it] = new Array(horizon).fill(0);
     gitByItem[it] = new Array(horizon).fill(0);
   });
+  const poDetailsByItem = {};
   (poPending || []).forEach((r) => {
     const idx = parseWeekToIndex(r.week, startMonday);
     if (!poPendingByItem[r.item]) poPendingByItem[r.item] = new Array(horizon).fill(0);
@@ -177,8 +178,14 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     if (idx >= 0 && idx < horizon) {
       poPendingByItem[r.item][idx] += toNum(r.quantity);
       schedReceiptByItem[r.item][idx] += toNum(r.quantity);
+      poDetailsByItem[r.item] = poDetailsByItem[r.item] || [];
+      poDetailsByItem[r.item].push({
+        poNumber: r.po_number || "?", quantity: toNum(r.quantity), weekIdx: idx,
+        weekLabel: weekLabels[idx],
+      });
     }
   });
+  Object.values(poDetailsByItem).forEach((list) => list.sort((a, b) => a.weekIdx - b.weekIdx));
   (git || []).forEach((r) => {
     if (!gitByItem[r.item]) gitByItem[r.item] = new Array(horizon).fill(0);
     if (!schedReceiptByItem[r.item]) schedReceiptByItem[r.item] = new Array(horizon).fill(0);
@@ -315,6 +322,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       consumption,
       scheduledReceipts: sr,
       poPending: poPendingByItem[item] || new Array(horizon).fill(0),
+      poPendingDetails: poDetailsByItem[item] || [],
       git: gitByItem[item] || new Array(horizon).fill(0),
       actualConsumption: actualByItem[item] || new Array(horizon).fill(0),
       consumptionVariance: gr.map((v, i) => (actualByItem[item] || [])[i] ? (actualByItem[item][i] - v) : null),
@@ -631,6 +639,31 @@ function RecordGrid({ rec, weeks, weekLabels }) {
             </div>
           )}
         </>
+      )}
+      {rec.poPendingDetails.length > 0 && (
+        <div style={{ padding: "0 10px 8px" }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.amber, display: "flex", alignItems: "center", gap: 4, marginBottom: 4 }}>
+            <ClipboardList size={11} /> PO pending — {rec.poPendingDetails.reduce((s, p) => s + p.quantity, 0)} {rec.unit} across {rec.poPendingDetails.length} PO{rec.poPendingDetails.length === 1 ? "" : "s"}
+          </div>
+          <table style={{ borderCollapse: "collapse", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, width: "100%", maxWidth: 480 }}>
+            <thead>
+              <tr style={{ color: COLORS.inkSoft }}>
+                <td style={{ padding: "2px 8px 2px 0", textAlign: "left" }}>PO #</td>
+                <td style={{ padding: "2px 8px" }}>QTY</td>
+                <td style={{ padding: "2px 0" }}>DUE WK</td>
+              </tr>
+            </thead>
+            <tbody>
+              {rec.poPendingDetails.map((p, i) => (
+                <tr key={`${p.poNumber}-${i}`}>
+                  <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{p.poNumber}</td>
+                  <td style={{ padding: "2px 8px" }}>{p.quantity}</td>
+                  <td style={{ padding: "2px 0" }}>{p.weekLabel}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
       <div style={{ overflowX: "auto" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 }}>
@@ -1026,7 +1059,7 @@ export default function MRPDashboard() {
         <UploadSlot label="Batches / Lots (expiry)" hint="item, batch_no, quantity, expiry_date"
           onFile={handleFile("batches", setBatches)} loaded={loadedFlags.batches} count={batches.length}
           onSample={() => { setBatches(SAMPLE_BATCHES); setLoadedFlags((f) => ({ ...f, batches: false })); }} />
-        <UploadSlot label="PO Pending" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity"
+        <UploadSlot label="PO Pending" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity, po_number"
           onFile={handleFile("poPending", setScheduledReceiptsPO)} loaded={loadedFlags.poPending} count={scheduledReceiptsPO.length}
           onSample={() => { setScheduledReceiptsPO(SAMPLE_PO_PENDING); setLoadedFlags((f) => ({ ...f, poPending: false })); }} />
         <UploadSlot label="GIT (Goods In Transit)" hint="item, quantity (arrives this week, no date needed)"
