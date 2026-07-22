@@ -36,8 +36,8 @@ const SAMPLE_DEMAND = [
 ];
 
 const SAMPLE_PO_PENDING = [
-  { item: "CHAIN-STD", week: 2, quantity: 25, po_number: "PO-4471" },
-  { item: "WHEEL-ASM", week: 1, quantity: 10, po_number: "PO-4455" },
+  { item: "CHAIN-STD", week: 2, quantity: 25, po_number: "TPO4471" },
+  { item: "WHEEL-ASM", week: 1, quantity: 10, po_number: "TPO4455" },
 ];
 
 const SAMPLE_GIT = [
@@ -70,6 +70,21 @@ const REQUIRED_COLS = {
 function toNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+// Finds a value in a CSV row regardless of header casing/spacing/punctuation
+// e.g. matches "po_number", "PO Number", "PO-No", "PONumber", "PO#" all to candidate "ponumber"
+function getField(row, candidates) {
+  for (const key of Object.keys(row)) {
+    const norm = key.toLowerCase().replace(/[\s_\-#.]/g, "");
+    for (const cand of candidates) {
+      if (norm === cand) {
+        const v = row[key];
+        if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+      }
+    }
+  }
+  return undefined;
 }
 
 // ---------- ISO week helpers ----------
@@ -157,6 +172,13 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
   order.forEach((it) => (grossReq[it] = new Array(horizon).fill(0)));
   const startMonday = mondayOfWeek(new Date());
   const weekLabels = weeks.map((_, i) => isoWeekLabel(new Date(startMonday.getTime() + i * 7 * 86400000)));
+  const weekDates = weeks.map((_, i) => {
+    const d = new Date(startMonday.getTime() + i * 7 * 86400000);
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    return `${dd}/${mm}`;
+  });
+  const weekMondayDates = weeks.map((_, i) => new Date(startMonday.getTime() + i * 7 * 86400000).toISOString().slice(0, 10));
   demand.forEach((r) => {
     const idx = parseWeekToIndex(r.week, startMonday);
     if (idx >= 0 && idx < horizon) grossReq[r.item][idx] += toNum(r.quantity);
@@ -180,8 +202,8 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       schedReceiptByItem[r.item][idx] += toNum(r.quantity);
       poDetailsByItem[r.item] = poDetailsByItem[r.item] || [];
       poDetailsByItem[r.item].push({
-        poNumber: r.po_number || "?", quantity: toNum(r.quantity), weekIdx: idx,
-        weekLabel: weekLabels[idx],
+        poNumber: getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"]) || "?", quantity: toNum(r.quantity), weekIdx: idx,
+        weekLabel: weekLabels[idx], mondayDate: weekMondayDates[idx],
       });
     }
   });
@@ -338,7 +360,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     };
   });
 
-  return { weeks, weekLabels, records, order, childrenOf };
+  return { weeks, weekLabels, weekDates, weekMondayDates, records, order, childrenOf };
 }
 
 // ---------- CSV helpers ----------
@@ -544,7 +566,7 @@ function TreeRow({ item, records, childrenOf, selected, onSelect, depth, onlyWit
   );
 }
 
-function RecordGrid({ rec, weeks, weekLabels }) {
+function RecordGrid({ rec, weeks, weekLabels, weekDates }) {
   if (!rec) return null;
   const rows = [
     { label: "Gross requirements (calculated)", data: rec.grossReq, kind: "gr" },
@@ -650,7 +672,8 @@ function RecordGrid({ rec, weeks, weekLabels }) {
               <tr style={{ color: COLORS.inkSoft }}>
                 <td style={{ padding: "2px 8px 2px 0", textAlign: "left" }}>PO #</td>
                 <td style={{ padding: "2px 8px" }}>QTY</td>
-                <td style={{ padding: "2px 0" }}>DUE WK</td>
+                <td style={{ padding: "2px 8px" }}>DUE WK</td>
+                <td style={{ padding: "2px 0" }}>DATE (MON)</td>
               </tr>
             </thead>
             <tbody>
@@ -658,7 +681,8 @@ function RecordGrid({ rec, weeks, weekLabels }) {
                 <tr key={`${p.poNumber}-${i}`}>
                   <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{p.poNumber}</td>
                   <td style={{ padding: "2px 8px" }}>{p.quantity}</td>
-                  <td style={{ padding: "2px 0" }}>{p.weekLabel}</td>
+                  <td style={{ padding: "2px 8px" }}>{p.weekLabel}</td>
+                  <td style={{ padding: "2px 0" }}>{p.mondayDate}</td>
                 </tr>
               ))}
             </tbody>
@@ -669,13 +693,18 @@ function RecordGrid({ rec, weeks, weekLabels }) {
         <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 }}>
           <thead>
             <tr>
-              <td style={{ padding: "6px 10px", color: COLORS.inkSoft, whiteSpace: "nowrap", borderTop: `1px solid ${COLORS.paperLine}` }}>WEEK</td>
+              <td style={{ padding: "6px 10px", color: COLORS.inkSoft, whiteSpace: "nowrap", borderTop: `1px solid ${COLORS.paperLine}` }}>
+                WEEK<div style={{ fontSize: 9, fontWeight: 400 }}>(Mon)</div>
+              </td>
               {weeks.map((w, i) => (
                 <td key={w} style={{
                   textAlign: "right", padding: "6px 8px", color: COLORS.inkSoft,
                   borderTop: `1px solid ${COLORS.paperLine}`, borderLeft: `1px solid ${COLORS.paperLine}`,
                   whiteSpace: "nowrap",
-                }}>{weekLabels[i]}</td>
+                }}>
+                  {weekLabels[i]}
+                  <div style={{ fontSize: 9, fontWeight: 400, color: COLORS.inkSoft, opacity: 0.85 }}>{weekDates[i]}</div>
+                </td>
               ))}
             </tr>
           </thead>
@@ -834,7 +863,7 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
                     </select>
                   </td>
                   <td style={{ padding: "4px 8px", textAlign: "right", borderBottom: `1px solid ${COLORS.paperLine}` }}>
-                    <input type="text" value={entry.poNumber} placeholder="PO-####"
+                    <input type="text" value={entry.poNumber} placeholder="TPO####"
                       onChange={(e) => updateEntry(r.key, { poNumber: e.target.value })}
                       style={{
                         fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, width: 78, textAlign: "right",
@@ -927,7 +956,7 @@ export default function MRPDashboard() {
     });
   }, []);
 
-  const { weeks, weekLabels, records, order, childrenOf } = useMemo(
+  const { weeks, weekLabels, weekDates, records, order, childrenOf } = useMemo(
     () => runMRP({ bom, inventory, demand, poPending: scheduledReceiptsPO, git: scheduledReceiptsGIT, actualConsumption, batches, horizon }),
     [bom, inventory, demand, scheduledReceiptsPO, scheduledReceiptsGIT, actualConsumption, batches, horizon]
   );
@@ -1147,7 +1176,7 @@ export default function MRPDashboard() {
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <RecordGrid rec={selectedRec} weeks={weeks} weekLabels={weekLabels} />
+          <RecordGrid rec={selectedRec} weeks={weeks} weekLabels={weekLabels} weekDates={weekDates} />
           <PlannedOrders records={records} weeks={weeks} weekLabels={weekLabels} orderStatus={orderStatus} setOrderStatus={setOrderStatus} />
         </div>
       </div>
