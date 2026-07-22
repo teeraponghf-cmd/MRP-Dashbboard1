@@ -74,13 +74,28 @@ function toNum(v, fallback = 0) {
 
 // Finds a value in a CSV row regardless of header casing/spacing/punctuation
 // e.g. matches "po_number", "PO Number", "PO-No", "PONumber", "PO#" all to candidate "ponumber"
-function getField(row, candidates) {
+function getField(row, candidates, fallbackSubstrings, excludeExact) {
   for (const key of Object.keys(row)) {
     const norm = key.toLowerCase().replace(/[\s_\-#.]/g, "");
     for (const cand of candidates) {
       if (norm === cand) {
         const v = row[key];
         if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+      }
+    }
+  }
+  // fallback: any column whose (normalized) name contains one of the substrings,
+  // skipping columns already claimed by other known fields (item/week/quantity/status)
+  if (fallbackSubstrings) {
+    const exclude = new Set(["item", "week", "quantity", "qty", "status", ...(excludeExact || [])]);
+    for (const key of Object.keys(row)) {
+      const norm = key.toLowerCase().replace(/[\s_\-#.]/g, "");
+      if (exclude.has(norm)) continue;
+      for (const sub of fallbackSubstrings) {
+        if (norm.includes(sub)) {
+          const v = row[key];
+          if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+        }
       }
     }
   }
@@ -202,7 +217,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       schedReceiptByItem[r.item][idx] += toNum(r.quantity);
       poDetailsByItem[r.item] = poDetailsByItem[r.item] || [];
       poDetailsByItem[r.item].push({
-        poNumber: getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"]) || "?", quantity: toNum(r.quantity), weekIdx: idx,
+        poNumber: getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]) || "?", quantity: toNum(r.quantity), weekIdx: idx,
         weekLabel: weekLabels[idx], mondayDate: weekMondayDates[idx],
       });
     }
@@ -961,6 +976,20 @@ export default function MRPDashboard() {
     [bom, inventory, demand, scheduledReceiptsPO, scheduledReceiptsGIT, actualConsumption, batches, horizon]
   );
 
+  const poPendingHeaderWarning = useMemo(() => {
+    if (!scheduledReceiptsPO.length) return null;
+    const headers = Object.keys(scheduledReceiptsPO[0]);
+    const strictCands = ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"];
+    const fallbackSubs = ["po", "ref", "doc"];
+    const exclude = new Set(["item", "week", "quantity", "qty", "status"]);
+    const matched = headers.some((h) => {
+      const norm = h.toLowerCase().replace(/[\s_\-#.]/g, "");
+      if (exclude.has(norm)) return false;
+      return strictCands.includes(norm) || fallbackSubs.some((s) => norm.includes(s));
+    });
+    return matched ? null : headers;
+  }, [scheduledReceiptsPO]);
+
   const topItems = useMemo(() => order.filter((it) => !records[it].hasParents), [order, records]);
 
   const usedInMap = useMemo(() => {
@@ -1102,6 +1131,16 @@ export default function MRPDashboard() {
           padding: "4px 10px", cursor: "pointer", alignSelf: "flex-start", marginTop: "auto", marginBottom: 6,
         }}><Download size={12} /> template</button>
       </div>
+
+      {poPendingHeaderWarning && (
+        <div style={{
+          border: `1px solid ${COLORS.amber}`, background: "#F3DDBC", color: "#5C4419",
+          padding: "6px 12px", marginBottom: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
+        }}>
+          Couldn't find a PO number column in your PO Pending file — columns detected: {poPendingHeaderWarning.join(", ")}.
+          Rename one to "po_number" (or anything containing "po") and re-upload.
+        </div>
+      )}
 
       {/* KPIs */}
       <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
