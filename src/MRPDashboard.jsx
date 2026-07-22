@@ -41,7 +41,7 @@ const SAMPLE_PO_PENDING = [
 ];
 
 const SAMPLE_GIT = [
-  { item: "FRAME-STD", week: 1, quantity: 20 },
+  { item: "FRAME-STD", quantity: 20 },
 ];
 
 const SAMPLE_ACTUAL_CONSUMPTION = [
@@ -62,7 +62,7 @@ const REQUIRED_COLS = {
   inventory: ["item", "on_hand", "lead_time_weeks", "lot_size", "safety_stock", "safety_factor", "description", "unit", "expiry_date (optional, if no batch file)"],
   demand: ["item", "week", "quantity"],
   poPending: ["item", "week", "quantity"],
-  git: ["item", "week", "quantity"],
+  git: ["item", "quantity"],
   actualConsumption: ["item", "week", "quantity"],
   batches: ["item", "batch_no", "quantity", "expiry_date"],
 };
@@ -180,13 +180,10 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     }
   });
   (git || []).forEach((r) => {
-    const idx = parseWeekToIndex(r.week, startMonday);
     if (!gitByItem[r.item]) gitByItem[r.item] = new Array(horizon).fill(0);
     if (!schedReceiptByItem[r.item]) schedReceiptByItem[r.item] = new Array(horizon).fill(0);
-    if (idx >= 0 && idx < horizon) {
-      gitByItem[r.item][idx] += toNum(r.quantity);
-      schedReceiptByItem[r.item][idx] += toNum(r.quantity);
-    }
+    gitByItem[r.item][0] += toNum(r.quantity);
+    schedReceiptByItem[r.item][0] += toNum(r.quantity);
   });
 
   const actualByItem = {};
@@ -1032,7 +1029,7 @@ export default function MRPDashboard() {
         <UploadSlot label="PO Pending" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity"
           onFile={handleFile("poPending", setScheduledReceiptsPO)} loaded={loadedFlags.poPending} count={scheduledReceiptsPO.length}
           onSample={() => { setScheduledReceiptsPO(SAMPLE_PO_PENDING); setLoadedFlags((f) => ({ ...f, poPending: false })); }} />
-        <UploadSlot label="GIT (Goods In Transit)" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity"
+        <UploadSlot label="GIT (Goods In Transit)" hint="item, quantity (arrives this week, no date needed)"
           onFile={handleFile("git", setScheduledReceiptsGIT)} loaded={loadedFlags.git} count={scheduledReceiptsGIT.length}
           onSample={() => { setScheduledReceiptsGIT(SAMPLE_GIT); setLoadedFlags((f) => ({ ...f, git: false })); }} />
         <button onClick={() => {
@@ -1123,7 +1120,7 @@ export default function MRPDashboard() {
       </div>
 
       <div style={{ marginTop: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft }}>
-        Note: planned orders round up to lot size; PO pending and GIT are netted against gross requirements in the week they're due. Expired on-hand stock is excluded from the plan (treated as 0). Actual consumption is compared against calculated gross requirements in the same week; variance only shows where actual data was entered. Upload your own CSVs to replace the sample bicycle BOM.
+        Note: planned orders round up to lot size; PO pending is netted against gross requirements in the week it's due, GIT is treated as arriving in week 1 (no date needed since it's already shipped). Expired on-hand stock is excluded from the plan (treated as 0). Actual consumption is compared against calculated gross requirements in the same week; variance only shows where actual data was entered. Upload your own CSVs to replace the sample bicycle BOM.
       </div>
     </div>
   );
