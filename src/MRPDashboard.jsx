@@ -50,20 +50,20 @@ const SAMPLE_GIT = [
 ];
 
 const SAMPLE_ACTUAL_CONSUMPTION = [
-  // Using explicit past weeks: 0 = last week, -1 = 2 weeks ago, -2 = 3 weeks ago, -3 = 4 weeks ago
-  { item: "BIKE-100", week: -2, quantity: 20 },
-  { item: "BIKE-100", week: -1, quantity: 22 },
-  { item: "BIKE-100", week: 0, quantity: 28 }, // Example of over-consumption (planned 25)
-  { item: "FRAME-STD", week: -3, quantity: 20 },
-  { item: "FRAME-STD", week: -2, quantity: 25 },
-  { item: "FRAME-STD", week: -1, quantity: 18 },
-  { item: "WHEEL-ASM", week: -3, quantity: 40 },
-  { item: "WHEEL-ASM", week: -2, quantity: 50 },
-  { item: "WHEEL-ASM", week: -1, quantity: 36 }, // Example of under-consumption
-  { item: "SPOKE-STD", week: -3, quantity: 1280 },
-  { item: "SPOKE-STD", week: -2, quantity: 1600 },
-  { item: "CHAIN-STD", week: -3, quantity: 20 },
+  { item: "BIKE-100", week: "26CW28", quantity: 20 },
+  { item: "BIKE-100", week: "26CW29", quantity: 22 },
+  { item: "BIKE-100", week: "26CW30", quantity: 28 }, // Example of over-consumption
+  { item: "FRAME-STD", week: "26CW27", quantity: 20 },
+  { item: "FRAME-STD", week: "26CW28", quantity: 25 },
+  { item: "FRAME-STD", week: "26CW29", quantity: 18 },
+  { item: "WHEEL-ASM", week: "26CW27", quantity: 40 },
+  { item: "WHEEL-ASM", week: "26CW28", quantity: 50 },
+  { item: "WHEEL-ASM", week: "26CW29", quantity: 36 }, // Example of under-consumption
+  { item: "SPOKE-STD", week: "26CW27", quantity: 1280 },
+  { item: "SPOKE-STD", week: "26CW28", quantity: 1600 },
+  { item: "CHAIN-STD", week: "26CW27", quantity: 20 },
 ];
+
 
 const SAMPLE_BATCHES = [
   { item: "SPOKE-STD", batch_no: "SPK-B1", quantity: 300, expiry_date: "2026-07-01" },
