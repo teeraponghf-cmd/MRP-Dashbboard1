@@ -307,18 +307,12 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     let onHandPrev = effectiveOnHand;
     for (let i = 0; i < horizon; i++) {
       let proj = onHandPrev + sr[i] - consumption[i];
-      let ordered = 0;
       if (proj < safety) {
         const need = safety - proj;
-        ordered = Math.ceil(need / lotSize) * lotSize;
+        const ordered = Math.ceil(need / lotSize) * lotSize;
+        plannedReceipt[i] = ordered;
+        proj += ordered;
       }
-      const override = (planAdjustments && planAdjustments[item]) ? planAdjustments[item][i] : undefined;
-      const isAdjusted = override !== undefined && override !== null && override !== "";
-      const finalReceipt = isAdjusted ? Math.max(0, toNum(override)) : ordered;
-      plannedReceipt[i] = finalReceipt;
-      plannedReceiptAdjusted[i] = isAdjusted;
-      plannedReceiptCalculated[i] = ordered;
-      proj += finalReceipt;
       projOnHand[i] = proj;
       netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - consumption[i]));
       onHandPrev = proj;
