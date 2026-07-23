@@ -15,15 +15,15 @@ const SAMPLE_BOM = [
 ];
 
 const SAMPLE_INVENTORY = [
-  { item: "BIKE-100", description: "Complete bicycle", unit: "EA", vendor: "", on_hand: 12, lead_time_weeks: 1, lot_size: 1, safety_stock: 5, safety_factor: 1, expiry_date: "" },
-  { item: "FRAME-STD", description: "Standard frame, welded", unit: "EA", vendor: "Apex Metal Works", on_hand: 40, lead_time_weeks: 3, lot_size: 20, safety_stock: 10, safety_factor: 1.2, expiry_date: "" },
-  { item: "WHEEL-ASM", description: "Wheel assembly, built", unit: "EA", vendor: "SpinCraft Wheels Co.", on_hand: 30, lead_time_weeks: 2, lot_size: 10, safety_stock: 8, safety_factor: 1, expiry_date: "" },
-  { item: "DRIVETRAIN-KIT", description: "Drivetrain kit", unit: "EA", vendor: "GearForge Ltd.", on_hand: 25, lead_time_weeks: 2, lot_size: 15, safety_stock: 6, safety_factor: 1, expiry_date: "" },
-  { item: "RIM-26", description: "26in alloy rim", unit: "EA", vendor: "Apex Metal Works", on_hand: 60, lead_time_weeks: 2, lot_size: 50, safety_stock: 20, safety_factor: 1, expiry_date: "" },
-  { item: "HUB-STD", description: "Standard hub", unit: "EA", vendor: "SpinCraft Wheels Co.", on_hand: 45, lead_time_weeks: 2, lot_size: 40, safety_stock: 15, safety_factor: 1, expiry_date: "" },
-  { item: "SPOKE-STD", description: "Steel spoke", unit: "PCS", vendor: "Apex Metal Works", on_hand: 900, lead_time_weeks: 1, lot_size: 1000, safety_stock: 300, safety_factor: 1, expiry_date: "" },
-  { item: "CHAIN-STD", description: "Standard chain, pre-lubed", unit: "EA", vendor: "GearForge Ltd.", on_hand: 20, lead_time_weeks: 4, lot_size: 25, safety_stock: 10, safety_factor: 1.5, expiry_date: "" },
-  { item: "CRANKSET", description: "Crankset, forged", unit: "EA", vendor: "GearForge Ltd.", on_hand: 18, lead_time_weeks: 4, lot_size: 20, safety_stock: 8, safety_factor: 1, expiry_date: "" },
+  { item: "BIKE-100", description: "Complete bicycle", unit: "EA", vendor: "", unit_price: 185, on_hand: 12, lead_time_weeks: 1, lot_size: 1, safety_stock: 5, safety_factor: 1, expiry_date: "" },
+  { item: "FRAME-STD", description: "Standard frame, welded", unit: "EA", vendor: "Apex Metal Works", unit_price: 42, on_hand: 40, lead_time_weeks: 3, lot_size: 20, safety_stock: 10, safety_factor: 1.2, expiry_date: "" },
+  { item: "WHEEL-ASM", description: "Wheel assembly, built", unit: "EA", vendor: "SpinCraft Wheels Co.", unit_price: 28, on_hand: 30, lead_time_weeks: 2, lot_size: 10, safety_stock: 8, safety_factor: 1, expiry_date: "" },
+  { item: "DRIVETRAIN-KIT", description: "Drivetrain kit", unit: "EA", vendor: "GearForge Ltd.", unit_price: 35, on_hand: 25, lead_time_weeks: 2, lot_size: 15, safety_stock: 6, safety_factor: 1, expiry_date: "" },
+  { item: "RIM-26", description: "26in alloy rim", unit: "EA", vendor: "Apex Metal Works", unit_price: 9.5, on_hand: 60, lead_time_weeks: 2, lot_size: 50, safety_stock: 20, safety_factor: 1, expiry_date: "" },
+  { item: "HUB-STD", description: "Standard hub", unit: "EA", vendor: "SpinCraft Wheels Co.", unit_price: 6.2, on_hand: 45, lead_time_weeks: 2, lot_size: 40, safety_stock: 15, safety_factor: 1, expiry_date: "" },
+  { item: "SPOKE-STD", description: "Steel spoke", unit: "PCS", vendor: "Apex Metal Works", unit_price: 0.15, on_hand: 900, lead_time_weeks: 1, lot_size: 1000, safety_stock: 300, safety_factor: 1, expiry_date: "" },
+  { item: "CHAIN-STD", description: "Standard chain, pre-lubed", unit: "EA", vendor: "GearForge Ltd.", unit_price: 4.8, on_hand: 20, lead_time_weeks: 4, lot_size: 25, safety_stock: 10, safety_factor: 1.5, expiry_date: "" },
+  { item: "CRANKSET", description: "Crankset, forged", unit: "EA", vendor: "GearForge Ltd.", unit_price: 12.5, on_hand: 18, lead_time_weeks: 4, lot_size: 20, safety_stock: 8, safety_factor: 1, expiry_date: "" },
 ];
 
 const SAMPLE_DEMAND = [
@@ -59,7 +59,7 @@ const SAMPLE_BATCHES = [
 
 const REQUIRED_COLS = {
   bom: ["parent_item", "component_item", "qty_per"],
-  inventory: ["item", "on_hand", "lead_time_weeks", "lot_size", "safety_stock", "safety_factor", "description", "unit", "vendor", "expiry_date (optional, if no batch file)"],
+  inventory: ["item", "on_hand", "lead_time_weeks", "lot_size", "safety_stock", "safety_factor", "description", "unit", "vendor", "unit_price", "expiry_date (optional, if no batch file)"],
   demand: ["item", "week", "quantity"],
   poPending: ["item", "week", "quantity", "po_number", "vendor"],
   git: ["item", "quantity"],
@@ -307,12 +307,18 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     let onHandPrev = effectiveOnHand;
     for (let i = 0; i < horizon; i++) {
       let proj = onHandPrev + sr[i] - consumption[i];
+      let ordered = 0;
       if (proj < safety) {
         const need = safety - proj;
-        const ordered = Math.ceil(need / lotSize) * lotSize;
-        plannedReceipt[i] = ordered;
-        proj += ordered;
+        ordered = Math.ceil(need / lotSize) * lotSize;
       }
+      const override = (planAdjustments && planAdjustments[item]) ? planAdjustments[item][i] : undefined;
+      const isAdjusted = override !== undefined && override !== null && override !== "";
+      const finalReceipt = isAdjusted ? Math.max(0, toNum(override)) : ordered;
+      plannedReceipt[i] = finalReceipt;
+      plannedReceiptAdjusted[i] = isAdjusted;
+      plannedReceiptCalculated[i] = ordered;
+      proj += finalReceipt;
       projOnHand[i] = proj;
       netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - consumption[i]));
       onHandPrev = proj;
@@ -344,6 +350,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       description: inv.description || item,
       unit: inv.unit || "EA",
       vendor: (inv.vendor || "").trim(),
+      unitPrice: toNum(inv.unit_price, 0),
       level: level[item] || 0,
       leadTime,
       lotSize,
@@ -353,6 +360,9 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       onHand: rawOnHand,
       usableOnHand: effectiveOnHand,
       expiredQty: Math.max(0, rawOnHand - effectiveOnHand),
+      onHandValue: rawOnHand * (toNum(inv.unit_price, 0)),
+      usableValue: effectiveOnHand * (toNum(inv.unit_price, 0)),
+      expiredValue: Math.max(0, rawOnHand - effectiveOnHand) * (toNum(inv.unit_price, 0)),
       batches: itemBatches,
       expiryDate: expiryDateStr,
       expired,
@@ -648,7 +658,7 @@ function VendorGroupTree({ groups, records, selected, onSelect, onlyWithOrders, 
   );
 }
 
-function RecordGrid({ rec, weeks, weekLabels, weekDates }) {
+function RecordGrid({ rec, weeks, weekLabels, weekDates, onAdjustPlan, onResetPlanOverride, onAdjustPOQty }) {
   if (!rec) return null;
   const rows = [
     { label: "Gross requirements (calculated)", data: rec.grossReq, kind: "gr" },
@@ -667,7 +677,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates }) {
     <div style={{ border: `1px solid ${COLORS.ink}`, background: COLORS.card }}>
       {/* title block */}
       <div style={{
-        display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr 1fr", borderBottom: `1px solid ${COLORS.ink}`,
+        display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr 1fr 1.2fr", borderBottom: `1px solid ${COLORS.ink}`,
         fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
       }}>
         {[
@@ -679,9 +689,12 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates }) {
           ["EXPIRY", rec.batches.length > 0
             ? `${rec.batches.length} batch${rec.batches.length === 1 ? "" : "es"}${rec.expired ? " (ALL EXPIRED)" : rec.expiredQty > 0 ? ` (${rec.expiredQty} exp.)` : ""}`
             : (rec.expiryDate ? (rec.expired ? "EXPIRED" : rec.expiryDate) : "\u2014")],
+          ["UNIT PRICE / VALUE", rec.unitPrice > 0
+            ? `${rec.unitPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })} \u00d7 ${rec.usableOnHand} = ${rec.usableValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+            : "\u2014"],
         ].map(([k, v], i) => (
           <div key={k} style={{
-            padding: "6px 10px", borderRight: i < 5 ? `1px solid ${COLORS.paperLine}` : "none",
+            padding: "6px 10px", borderRight: i < 6 ? `1px solid ${COLORS.paperLine}` : "none",
             background: k === "EXPIRY" && rec.expired ? COLORS.rust : k === "EXPIRY" && rec.expiringSoon ? "#F3DDBC" : "transparent",
           }}>
             <div style={{ color: k === "EXPIRY" && rec.expired ? "#F6D9D3" : COLORS.inkSoft, letterSpacing: "0.05em" }}>{k}</div>
@@ -764,7 +777,14 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates }) {
                 <tr key={`${p.poNumber}-${i}`}>
                   <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{p.poNumber}</td>
                   <td style={{ padding: "2px 8px", color: COLORS.inkSoft }}>{p.vendor || "\u2014"}</td>
-                  <td style={{ padding: "2px 8px" }}>{p.quantity}</td>
+                  <td style={{ padding: "0 4px" }}>
+                    <input type="number" min={0} value={p.quantity}
+                      onChange={(e) => onAdjustPOQty(rec.item, p.poNumber, e.target.value)}
+                      style={{
+                        width: 48, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
+                        border: `1px solid ${COLORS.paperLine}`, background: "#fff", color: COLORS.ink, padding: "1px 3px",
+                      }} />
+                  </td>
                   <td style={{ padding: "2px 8px" }}>{p.weekLabel}</td>
                   <td style={{ padding: "2px 0" }}>{p.mondayDate}</td>
                 </tr>
@@ -812,12 +832,35 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates }) {
                     else if (v > 0) { bg = "#F3DDBC"; color = COLORS.amber; }
                     else { bg = "#F6D9D3"; color = COLORS.rust; }
                   }
+                  const isOverridden = r.kind === "prel" && rec.plannedReleaseOriginal && rec.plannedReleaseOriginal[i] !== v;
                   return (
                     <td key={i} style={{
-                      textAlign: "right", padding: "6px 8px", borderTop: `1px solid ${COLORS.paperLine}`,
+                      textAlign: "right", padding: r.kind === "prel" ? "3px 4px" : "6px 8px", borderTop: `1px solid ${COLORS.paperLine}`,
                       borderLeft: `1px solid ${COLORS.paperLine}`, color, background: bg,
+                      outline: isOverridden ? `2px solid ${COLORS.amber}` : "none", outlineOffset: "-2px",
                     }}>
-                      {v === null || v === undefined ? "—" : (r.kind === "variance" ? (v > 0 ? `+${Math.round(v)}` : Math.round(v)) : (v ? Math.round(v) : "—"))}
+                      {r.kind === "prel" ? (
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2 }}>
+                          {isOverridden && (
+                            <button onClick={() => onResetPlanOverride(rec.item, i)} title="reset to calculated value" style={{
+                              border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
+                              fontSize: 9, padding: 0, lineHeight: 1,
+                            }}>&#8635;</button>
+                          )}
+                          <input
+                            type="number" min={0}
+                            value={v || ""}
+                            placeholder="\u2014"
+                            onChange={(e) => onAdjustPlan(rec.item, i, e.target.value)}
+                            style={{
+                              width: 42, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5,
+                              border: "none", background: "transparent", color, padding: "3px 2px",
+                            }}
+                          />
+                        </div>
+                      ) : (
+                        v === null || v === undefined ? "—" : (r.kind === "variance" ? (v > 0 ? `+${Math.round(v)}` : Math.round(v)) : (v ? Math.round(v) : "—"))
+                      )}
                     </td>
                   );
                 })}
@@ -1024,12 +1067,12 @@ export default function MRPDashboard() {
   useEffect(() => { if (hydrated) storageSet("horizon", horizon); }, [horizon, hydrated]);
   useEffect(() => { if (hydrated) storageSet("orderStatus", orderStatus); }, [orderStatus, hydrated]);
 
-  const PERSIST_KEYS = ["bom", "inventory", "demand", "poPending", "git", "actualConsumption", "batches", "horizon", "orderStatus"];
+  const PERSIST_KEYS = ["bom", "inventory", "demand", "poPending", "git", "actualConsumption", "batches", "horizon", "orderStatus", "planOverrides"];
   const clearSavedData = async () => {
     await storageClearAll(PERSIST_KEYS);
     setBom(SAMPLE_BOM); setInventory(SAMPLE_INVENTORY); setDemand(SAMPLE_DEMAND);
     setScheduledReceiptsPO(SAMPLE_PO_PENDING); setScheduledReceiptsGIT(SAMPLE_GIT);
-    setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setBatches(SAMPLE_BATCHES); setHorizon(12); setOrderStatus({});
+    setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setBatches(SAMPLE_BATCHES); setHorizon(12); setOrderStatus({}); setPlanOverrides({});
     setLoadedFlags({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
   };
 
@@ -1040,10 +1083,68 @@ export default function MRPDashboard() {
     });
   }, []);
 
-  const { weeks, weekLabels, weekDates, records, order, childrenOf } = useMemo(
+  const { weeks, weekLabels, weekDates, records: rawRecords, order, childrenOf } = useMemo(
     () => runMRP({ bom, inventory, demand, poPending: scheduledReceiptsPO, git: scheduledReceiptsGIT, actualConsumption, batches, horizon }),
     [bom, inventory, demand, scheduledReceiptsPO, scheduledReceiptsGIT, actualConsumption, batches, horizon]
   );
+
+  const [planOverrides, setPlanOverrides] = useState({}); // key: "item::weekIndex" -> manually adjusted planned release qty
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const po = await storageGet("planOverrides");
+      if (!cancelled && po) setPlanOverrides(po);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => { if (hydrated) storageSet("planOverrides", planOverrides); }, [planOverrides, hydrated]);
+
+  // downstream code refers to "records" everywhere - this shadows the raw MRP output with
+  // manually-adjusted planned release quantities layered on top, so every consumer (tree
+  // badges, KPIs, Order Planning table, vendor groups) automatically reflects overrides.
+  const records = useMemo(() => {
+    const result = {};
+    Object.entries(rawRecords).forEach(([item, rec]) => {
+      const adjustedRelease = rec.plannedRelease.map((v, i) => {
+        const key = `${item}::${i}`;
+        return planOverrides[key] !== undefined ? planOverrides[key] : v;
+      });
+      result[item] = { ...rec, plannedReleaseOriginal: rec.plannedRelease, plannedRelease: adjustedRelease };
+    });
+    return result;
+  }, [rawRecords, planOverrides]);
+
+  const adjustPlan = (item, weekIndex, rawValue) => {
+    const key = `${item}::${weekIndex}`;
+    setPlanOverrides((prev) => {
+      const next = { ...prev };
+      if (rawValue === "" || rawValue === null) { delete next[key]; return next; }
+      const n = Number(rawValue);
+      if (!Number.isFinite(n) || n < 0) return prev;
+      next[key] = n;
+      return next;
+    });
+  };
+  const resetPlanOverride = (item, weekIndex) => {
+    const key = `${item}::${weekIndex}`;
+    setPlanOverrides((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const adjustPOQty = (item, poNumber, rawValue) => {
+    const n = Number(rawValue);
+    if (!Number.isFinite(n) || n < 0) return;
+    setScheduledReceiptsPO((prev) => prev.map((r) => {
+      const matchesItem = r.item === item;
+      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]);
+      return matchesItem && rPo === poNumber ? { ...r, quantity: n } : r;
+    }));
+  };
 
   const poPendingHeaderWarning = useMemo(() => {
     if (!scheduledReceiptsPO.length) return null;
@@ -1116,15 +1217,17 @@ export default function MRPDashboard() {
   const visibleTopItems = onlyWithOrders ? activeTopItems.filter((it) => activeOrderMap[it]) : activeTopItems;
 
   const kpis = useMemo(() => {
-    let pastDue = 0, ordersNeeded = 0, belowSafety = 0, expiredCount = 0, expiringSoonCount = 0, varianceCount = 0;
+    let pastDue = 0, ordersNeeded = 0, belowSafety = 0, expiredCount = 0, expiringSoonCount = 0, varianceCount = 0, totalValue = 0, expiredValue = 0;
     Object.values(records).forEach((rec) => {
       rec.plannedRelease.forEach((v, i) => { if (v > 0) { ordersNeeded++; if (rec.pastDue[i]) pastDue++; } });
       if (rec.projOnHand[0] < rec.safety) belowSafety++;
       if (rec.expired) expiredCount++;
       else if (rec.expiringSoon) expiringSoonCount++;
       if (rec.consumptionVariance.some((v) => v !== null && Math.abs(v) >= 0.5)) varianceCount++;
+      totalValue += rec.usableValue;
+      expiredValue += rec.expiredValue;
     });
-    return { pastDue, ordersNeeded, belowSafety, itemCount: order.length, expiredCount, expiringSoonCount, varianceCount };
+    return { pastDue, ordersNeeded, belowSafety, itemCount: order.length, expiredCount, expiringSoonCount, varianceCount, totalValue, expiredValue };
   }, [records, order]);
 
   const selectedRec = records[selected];
@@ -1189,7 +1292,7 @@ export default function MRPDashboard() {
         <UploadSlot label="Bill of Materials" hint="parent_item, component_item, qty_per"
           onFile={handleFile("bom", setBom)} loaded={loadedFlags.bom} count={bom.length}
           onSample={() => { setBom(SAMPLE_BOM); setLoadedFlags((f) => ({ ...f, bom: false })); }} />
-        <UploadSlot label="Inventory Master" hint="item, on_hand, lead_time_weeks, lot_size, safety_stock, safety_factor, vendor, expiry_date"
+        <UploadSlot label="Inventory Master" hint="item, on_hand, lead_time_weeks, lot_size, safety_stock, safety_factor, vendor, unit_price, expiry_date"
           onFile={handleFile("inventory", setInventory)} loaded={loadedFlags.inventory} count={inventory.length}
           onSample={() => { setInventory(SAMPLE_INVENTORY); setLoadedFlags((f) => ({ ...f, inventory: false })); }} />
         <UploadSlot label="Demand Schedule" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity"
@@ -1237,6 +1340,8 @@ export default function MRPDashboard() {
         <KPI label="Expired stock" value={kpis.expiredCount} tone="rust" icon={CalendarX} />
         <KPI label="Expiring within 4 wks" value={kpis.expiringSoonCount} tone="amber" icon={CalendarX} />
         <KPI label="Consumption variance" value={kpis.varianceCount} tone="steel" icon={Scale} />
+        <KPI label="Usable inventory value" value={kpis.totalValue.toLocaleString(undefined, { maximumFractionDigits: 0 })} tone="moss" icon={Gauge} />
+        <KPI label="Value at risk (expired)" value={kpis.expiredValue.toLocaleString(undefined, { maximumFractionDigits: 0 })} tone="rust" icon={CalendarX} />
       </div>
 
       {/* main */}
@@ -1306,13 +1411,14 @@ export default function MRPDashboard() {
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <RecordGrid rec={selectedRec} weeks={weeks} weekLabels={weekLabels} weekDates={weekDates} />
+          <RecordGrid rec={selectedRec} weeks={weeks} weekLabels={weekLabels} weekDates={weekDates}
+            onAdjustPlan={adjustPlan} onResetPlanOverride={resetPlanOverride} onAdjustPOQty={adjustPOQty} />
           <PlannedOrders records={records} weeks={weeks} weekLabels={weekLabels} orderStatus={orderStatus} setOrderStatus={setOrderStatus} />
         </div>
       </div>
 
       <div style={{ marginTop: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft }}>
-        Note: planned orders round up to lot size; PO pending is netted against gross requirements in the week it's due, GIT is treated as arriving in week 1 (no date needed since it's already shipped). Expired on-hand stock is excluded from the plan (treated as 0). Actual consumption is compared against calculated gross requirements in the same week; variance only shows where actual data was entered. Upload your own CSVs to replace the sample bicycle BOM.
+        Note: planned orders round up to lot size; PO pending is netted against gross requirements in the week it's due, GIT is treated as arriving in week 1 (no date needed since it's already shipped). Expired on-hand stock is excluded from the plan (treated as 0). Actual consumption is compared against calculated gross requirements in the same week; variance only shows where actual data was entered. "Planned order release" cells and PO pending quantities are directly editable \u2014 type a new number to override the calculated plan (amber outline marks an override; click \u21ba to reset). Upload your own CSVs to replace the sample bicycle BOM.
       </div>
     </div>
   );
