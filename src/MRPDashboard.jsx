@@ -652,7 +652,7 @@ function VendorGroupTree({ groups, records, selected, onSelect, onlyWithOrders, 
   );
 }
 
-function RecordGrid({ rec, weeks, weekLabels, weekDates, onAdjustPlan, onResetPlanOverride, onAdjustPOQty }) {
+function RecordGrid({ rec, weeks, weekLabels, weekDates, onAdjustPlan, onResetPlanOverride, onAdjustPOQty, poOriginalQtyMap, onResetPOQty }) {
   if (!rec) return null;
   const rows = [
     { label: "Gross requirements (calculated)", data: rec.grossReq, kind: "gr" },
@@ -767,22 +767,34 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, onAdjustPlan, onResetPl
               </tr>
             </thead>
             <tbody>
-              {rec.poPendingDetails.map((p, i) => (
-                <tr key={`${p.poNumber}-${i}`}>
-                  <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{p.poNumber}</td>
-                  <td style={{ padding: "2px 8px", color: COLORS.inkSoft }}>{p.vendor || "\u2014"}</td>
-                  <td style={{ padding: "0 4px" }}>
-                    <input type="number" min={0} value={p.quantity}
-                      onChange={(e) => onAdjustPOQty(rec.item, p.poNumber, e.target.value)}
-                      style={{
-                        width: 48, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
-                        border: `1px solid ${COLORS.paperLine}`, background: "#fff", color: COLORS.ink, padding: "1px 3px",
-                      }} />
-                  </td>
-                  <td style={{ padding: "2px 8px" }}>{p.weekLabel}</td>
-                  <td style={{ padding: "2px 0" }}>{p.mondayDate}</td>
-                </tr>
-              ))}
+              {rec.poPendingDetails.map((p, i) => {
+                const origQty = poOriginalQtyMap ? poOriginalQtyMap[`${rec.item}::${p.poNumber}`] : undefined;
+                const isOverridden = origQty !== undefined && origQty !== p.quantity;
+                return (
+                  <tr key={`${p.poNumber}-${i}`}>
+                    <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{p.poNumber}</td>
+                    <td style={{ padding: "2px 8px", color: COLORS.inkSoft }}>{p.vendor || "\u2014"}</td>
+                    <td style={{ padding: "0 4px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
+                        {isOverridden && (
+                          <button onClick={() => onResetPOQty(rec.item, p.poNumber)} title={`reset to original (${origQty})`} style={{
+                            border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
+                            fontSize: 9, padding: 0, lineHeight: 1,
+                          }}>&#8635;</button>
+                        )}
+                        <input type="number" min={0} value={p.quantity}
+                          onChange={(e) => onAdjustPOQty(rec.item, p.poNumber, e.target.value)}
+                          style={{
+                            width: 48, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
+                            border: `1px solid ${isOverridden ? COLORS.amber : COLORS.paperLine}`, background: "#fff", color: COLORS.ink, padding: "1px 3px",
+                          }} />
+                      </div>
+                    </td>
+                    <td style={{ padding: "2px 8px" }}>{p.weekLabel}</td>
+                    <td style={{ padding: "2px 0" }}>{p.mondayDate}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -1011,6 +1023,7 @@ export default function MRPDashboard() {
   const [inventory, setInventory] = useState(SAMPLE_INVENTORY);
   const [demand, setDemand] = useState(SAMPLE_DEMAND);
   const [scheduledReceiptsPO, setScheduledReceiptsPO] = useState(SAMPLE_PO_PENDING);
+  const [scheduledReceiptsPOOriginal, setScheduledReceiptsPOOriginal] = useState(SAMPLE_PO_PENDING);
   const [scheduledReceiptsGIT, setScheduledReceiptsGIT] = useState(SAMPLE_GIT);
   const [actualConsumption, setActualConsumption] = useState(SAMPLE_ACTUAL_CONSUMPTION);
   const [batches, setBatches] = useState(SAMPLE_BATCHES);
@@ -1039,7 +1052,7 @@ export default function MRPDashboard() {
       if (b) { setBom(b); setLoadedFlags((f) => ({ ...f, bom: true })); }
       if (inv) { setInventory(inv); setLoadedFlags((f) => ({ ...f, inventory: true })); }
       if (dem) { setDemand(dem); setLoadedFlags((f) => ({ ...f, demand: true })); }
-      if (po) { setScheduledReceiptsPO(po); setLoadedFlags((f) => ({ ...f, poPending: true })); }
+      if (po) { setScheduledReceiptsPO(po); setScheduledReceiptsPOOriginal(po); setLoadedFlags((f) => ({ ...f, poPending: true })); }
       if (git) { setScheduledReceiptsGIT(git); setLoadedFlags((f) => ({ ...f, git: true })); }
       if (ac) { setActualConsumption(ac); setLoadedFlags((f) => ({ ...f, actualConsumption: true })); }
       if (bt) { setBatches(bt); setLoadedFlags((f) => ({ ...f, batches: true })); }
@@ -1065,7 +1078,7 @@ export default function MRPDashboard() {
   const clearSavedData = async () => {
     await storageClearAll(PERSIST_KEYS);
     setBom(SAMPLE_BOM); setInventory(SAMPLE_INVENTORY); setDemand(SAMPLE_DEMAND);
-    setScheduledReceiptsPO(SAMPLE_PO_PENDING); setScheduledReceiptsGIT(SAMPLE_GIT);
+    setScheduledReceiptsPO(SAMPLE_PO_PENDING); setScheduledReceiptsPOOriginal(SAMPLE_PO_PENDING); setScheduledReceiptsGIT(SAMPLE_GIT);
     setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setBatches(SAMPLE_BATCHES); setHorizon(12); setOrderStatus({}); setPlanOverrides({});
     setLoadedFlags({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
   };
@@ -1074,6 +1087,14 @@ export default function MRPDashboard() {
     parseCSV(file, (rows) => {
       setter(rows);
       setLoadedFlags((f) => ({ ...f, [key]: true }));
+    });
+  }, []);
+
+  const handlePoPendingFile = useCallback((file) => {
+    parseCSV(file, (rows) => {
+      setScheduledReceiptsPO(rows);
+      setScheduledReceiptsPOOriginal(rows);
+      setLoadedFlags((f) => ({ ...f, poPending: true }));
     });
   }, []);
 
@@ -1137,6 +1158,25 @@ export default function MRPDashboard() {
       const matchesItem = r.item === item;
       const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]);
       return matchesItem && rPo === poNumber ? { ...r, quantity: n } : r;
+    }));
+  };
+
+  const poOriginalQtyMap = useMemo(() => {
+    const map = {};
+    scheduledReceiptsPOOriginal.forEach((r) => {
+      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]) || "?";
+      map[`${r.item}::${rPo}`] = toNum(r.quantity);
+    });
+    return map;
+  }, [scheduledReceiptsPOOriginal]);
+
+  const resetPOQty = (item, poNumber) => {
+    const orig = poOriginalQtyMap[`${item}::${poNumber}`];
+    if (orig === undefined) return;
+    setScheduledReceiptsPO((prev) => prev.map((r) => {
+      const matchesItem = r.item === item;
+      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]);
+      return matchesItem && rPo === poNumber ? { ...r, quantity: orig } : r;
     }));
   };
 
@@ -1299,8 +1339,8 @@ export default function MRPDashboard() {
           onFile={handleFile("batches", setBatches)} loaded={loadedFlags.batches} count={batches.length}
           onSample={() => { setBatches(SAMPLE_BATCHES); setLoadedFlags((f) => ({ ...f, batches: false })); }} />
         <UploadSlot label="PO Pending" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity, po_number, vendor"
-          onFile={handleFile("poPending", setScheduledReceiptsPO)} loaded={loadedFlags.poPending} count={scheduledReceiptsPO.length}
-          onSample={() => { setScheduledReceiptsPO(SAMPLE_PO_PENDING); setLoadedFlags((f) => ({ ...f, poPending: false })); }} />
+          onFile={handlePoPendingFile} loaded={loadedFlags.poPending} count={scheduledReceiptsPO.length}
+          onSample={() => { setScheduledReceiptsPO(SAMPLE_PO_PENDING); setScheduledReceiptsPOOriginal(SAMPLE_PO_PENDING); setLoadedFlags((f) => ({ ...f, poPending: false })); }} />
         <UploadSlot label="GIT (Goods In Transit)" hint="item, quantity (arrives this week, no date needed)"
           onFile={handleFile("git", setScheduledReceiptsGIT)} loaded={loadedFlags.git} count={scheduledReceiptsGIT.length}
           onSample={() => { setScheduledReceiptsGIT(SAMPLE_GIT); setLoadedFlags((f) => ({ ...f, git: false })); }} />
@@ -1406,7 +1446,8 @@ export default function MRPDashboard() {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <RecordGrid rec={selectedRec} weeks={weeks} weekLabels={weekLabels} weekDates={weekDates}
-            onAdjustPlan={adjustPlan} onResetPlanOverride={resetPlanOverride} onAdjustPOQty={adjustPOQty} />
+            onAdjustPlan={adjustPlan} onResetPlanOverride={resetPlanOverride} onAdjustPOQty={adjustPOQty}
+            poOriginalQtyMap={poOriginalQtyMap} onResetPOQty={resetPOQty} />
           <PlannedOrders records={records} weeks={weeks} weekLabels={weekLabels} orderStatus={orderStatus} setOrderStatus={setOrderStatus} />
         </div>
       </div>
