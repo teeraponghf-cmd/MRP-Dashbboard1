@@ -352,13 +352,11 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       grossReq[component] = grossReq[component] || new Array(totalCols).fill(0);
       for (let i = 0; i < totalCols; i++) {
         if (i < HW) {
-          // สัปดาห์อดีต: ดึง Gross Req จากแม่ ถอยหลังตาม Lead Time เพื่อเป็นแผนให้ชิ้นส่วนลูก
           const pastReleaseIdx = i - leadTime;
           if (pastReleaseIdx >= 0) {
             grossReq[component][pastReleaseIdx] += (gr[i] || 0) * qty_per;
           }
         } else {
-          // สัปดาห์อนาคต: ดึงจาก Planned Release ของแม่
           grossReq[component][i] += (plannedRelease[i] || 0) * qty_per;
         }
       }
@@ -366,6 +364,8 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
 
     const actualCons = actualByItem[item] || new Array(totalCols).fill(0);
     const pastActualTotal = actualCons.slice(0, HW).reduce((a, b) => a + b, 0);
+    // คำนวณค่าเฉลี่ยต่อสัปดาห์ย้อนหลัง
+    const pastActualAvg = HW > 0 ? pastActualTotal / HW : 0;
 
     records[item] = {
       item,
@@ -398,6 +398,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       git: gitByItem[item] || new Array(horizon).fill(0),
       actualConsumption: actualCons,
       pastActualTotal,
+      pastActualAvg,
       consumptionVariance: gr.map((v, i) => i < HW ? (actualCons[i] - v) : null),
       projOnHand,
       netReq,
@@ -693,6 +694,8 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
     { label: "Planned order release", data: rec.plannedRelease, kind: "prel" },
   ];
 
+  const formattedAvg = rec.pastActualAvg.toLocaleString(undefined, { maximumFractionDigits: 1 });
+
   return (
     <div style={{ border: `1px solid ${COLORS.ink}`, background: COLORS.card }}>
       {/* title block */}
@@ -705,7 +708,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
           ["UNIT", rec.unit],
           ["LEAD TIME (WK)", rec.leadTime],
           ["LOT SIZE / SS", `${rec.lotSize} / ${rec.baseSafety}${rec.safetyFactor !== 1 ? ` \u00d7${rec.safetyFactor} = ${rec.safety}` : ""}`],
-          [`PAST ${historyWeeks}W ACTUAL`, `${rec.pastActualTotal.toLocaleString()} ${rec.unit}`],
+          [`PAST ${historyWeeks}W AVG`, `${formattedAvg} ${rec.unit}/wk (${rec.pastActualTotal.toLocaleString()} total)`],
           ["EXPIRY", rec.batches.length > 0
             ? `${rec.batches.length} batch${rec.batches.length === 1 ? "" : "es"}${rec.expired ? " (ALL EXPIRED)" : rec.expiredQty > 0 ? ` (${rec.expiredQty} exp.)` : ""}`
             : (rec.expiryDate ? (rec.expired ? "EXPIRED" : rec.expiryDate) : "\u2014")],
@@ -715,9 +718,9 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
         ].map(([k, v], i) => (
           <div key={k} style={{
             padding: "6px 10px", borderRight: i < 6 ? `1px solid ${COLORS.paperLine}` : "none",
-            background: k === "EXPIRY" && rec.expired ? COLORS.rust : k === "EXPIRY" && rec.expiringSoon ? "#F3DDBC" : k.includes("ACTUAL") ? "#E3E9D6" : "transparent",
+            background: k === "EXPIRY" && rec.expired ? COLORS.rust : k === "EXPIRY" && rec.expiringSoon ? "#F3DDBC" : k.includes("AVG") ? "#E3E9D6" : "transparent",
           }}>
-            <div style={{ color: k === "EXPIRY" && rec.expired ? "#F6D9D3" : k.includes("ACTUAL") ? COLORS.moss : COLORS.inkSoft, letterSpacing: "0.05em" }}>{k}</div>
+            <div style={{ color: k === "EXPIRY" && rec.expired ? "#F6D9D3" : k.includes("AVG") ? COLORS.moss : COLORS.inkSoft, letterSpacing: "0.05em" }}>{k}</div>
             <div style={{ color: k === "EXPIRY" && rec.expired ? "#fff" : k === "EXPIRY" && rec.expiringSoon ? COLORS.amber : COLORS.ink, fontWeight: 600, fontSize: 12 }}>{v}</div>
           </div>
         ))}
