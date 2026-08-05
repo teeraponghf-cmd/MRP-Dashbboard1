@@ -2,7 +2,7 @@ import React, { useState, useMemo, useCallback, useEffect } from "react";
 import Papa from "papaparse";
 import { AlertTriangle, Upload, Download, ChevronRight, ChevronDown, PackageSearch, Gauge, ClipboardList, CircleAlert, Layers, ChevronsDown, ChevronsUp, CalendarX, Scale } from "lucide-react";
 
-// ---------- Sample data (bicycle sub-assembly) ----------
+// ---------- Sample data ----------
 const SAMPLE_BOM = [
   { parent_item: "BIKE-100", component_item: "FRAME-STD", qty_per: 1 },
   { parent_item: "BIKE-100", component_item: "WHEEL-ASM", qty_per: 2 },
@@ -27,13 +27,9 @@ const SAMPLE_INVENTORY = [
 ];
 
 const SAMPLE_DEMAND = [
-  // Historical Demand (Past weeks)
-  { item: "BIKE-100", week: "26CW25", quantity: 15 },
-  { item: "BIKE-100", week: "26CW26", quantity: 18 },
   { item: "BIKE-100", week: "26CW27", quantity: 20 },
   { item: "BIKE-100", week: "26CW28", quantity: 22 },
   { item: "BIKE-100", week: "26CW29", quantity: 25 },
-  // Future Demand
   { item: "BIKE-100", week: "26CW32", quantity: 20 },
   { item: "BIKE-100", week: "26CW34", quantity: 25 },
   { item: "BIKE-100", week: "26CW36", quantity: 30 },
@@ -61,7 +57,7 @@ const SAMPLE_ACTUAL_CONSUMPTION = [
   { item: "WHEEL-ASM", week: "26CW27", quantity: 40 },
   { item: "WHEEL-ASM", week: "26CW28", quantity: 50 },
   { item: "WHEEL-ASM", week: "26CW29", quantity: 36 },
-  { item: "SPOKE-STD", week: "26CW27", quantity: 1280 },
+  { item: "SPOKE-STD", week: "26CW27", quantity: 1280 }, // ตัวอย่างเลขหลักพัน
   { item: "SPOKE-STD", week: "26CW28", quantity: 1600 },
   { item: "CHAIN-STD", week: "26CW27", quantity: 20 },
 ];
@@ -73,25 +69,20 @@ const SAMPLE_BATCHES = [
   { item: "CHAIN-STD", batch_no: "CHN-B2", quantity: 12, expiry_date: "2026-12-01" },
 ];
 
-const REQUIRED_COLS = {
-  bom: ["parent_item", "component_item", "qty_per"],
-  inventory: ["item", "on_hand", "lead_time_weeks", "lot_size", "safety_stock", "safety_factor", "description", "unit", "vendor", "unit_price", "expiry_date (optional, if no batch file)"],
-  demand: ["item", "week", "quantity"],
-  poPending: ["item", "week", "quantity", "po_number", "vendor"],
-  git: ["item", "quantity"],
-  actualConsumption: ["item", "week", "quantity"],
-  batches: ["item", "batch_no", "quantity", "expiry_date"],
-};
-
+// ---------- Bulletproof CSV Parsers ----------
 function toNum(v, fallback = 0) {
-  const n = Number(v);
+  if (v === undefined || v === null) return fallback;
+  if (typeof v === 'number') return isNaN(v) ? fallback : v;
+  // ลบเครื่องหมาย Comma เวลา Export จาก Excel (เช่น 1,280 -> 1280)
+  const str = String(v).replace(/,/g, '').trim();
+  const n = Number(str);
   return Number.isFinite(n) ? n : fallback;
 }
 
-// Finds a value in a CSV row regardless of header casing/spacing/punctuation
-function getField(row, candidates, fallbackSubstrings, excludeExact) {
+function getField(row, candidates, fallbackSubstrings) {
   for (const key of Object.keys(row)) {
-    const norm = key.toLowerCase().replace(/[\s_\-#.]/g, "");
+    // ลบอักขระล่องหน (BOM) และช่องว่างทั้งหมด ให้เหลือแค่ a-z และ 0-9
+    const norm = key.toLowerCase().replace(/[^a-z0-9]/g, "");
     for (const cand of candidates) {
       if (norm === cand) {
         const v = row[key];
@@ -100,10 +91,8 @@ function getField(row, candidates, fallbackSubstrings, excludeExact) {
     }
   }
   if (fallbackSubstrings) {
-    const exclude = new Set(["item", "week", "quantity", "qty", "status", ...(excludeExact || [])]);
     for (const key of Object.keys(row)) {
-      const norm = key.toLowerCase().replace(/[\s_\-#.]/g, "");
-      if (exclude.has(norm)) continue;
+      const norm = key.toLowerCase().replace(/[^a-z0-9]/g, "");
       for (const sub of fallbackSubstrings) {
         if (norm.includes(sub)) {
           const v = row[key];
@@ -113,6 +102,11 @@ function getField(row, candidates, fallbackSubstrings, excludeExact) {
     }
   }
   return undefined;
+}
+
+function extract(r, exactProp, cands, subs) {
+  if (r[exactProp] !== undefined && r[exactProp] !== "") return r[exactProp];
+  return getField(r, cands, subs);
 }
 
 // ---------- ISO week helpers ----------
@@ -141,7 +135,8 @@ function isoWeekToMonday(year, week) {
   return target;
 }
 function parseWeekToIndex(weekValue, startMonday) {
-  const s = String(weekValue).trim();
+  if (weekValue === undefined || weekValue === null) return 0;
+  const s = String(weekValue).trim().replace(/\s+/g, '');
   let m = s.match(/^(\d{2,4})CW(\d{1,2})$/i);
   if (!m) m = s.match(/^(\d{4})-W(\d{1,2})$/i);
   if (m) {
@@ -159,23 +154,48 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
   const HW = Math.max(0, historyWeeks || 0);
   const totalCols = HW + horizon;
   const weeks = Array.from({ length: totalCols }, (_, i) => i + 1);
+  
   const invByItem = {};
-  inventory.forEach((r) => (invByItem[r.item] = r));
+  inventory.forEach((r) => {
+    let rawItem = extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item", "part"]);
+    if (!rawItem) return;
+    rawItem = String(rawItem).trim();
+    invByItem[rawItem] = {
+      item: rawItem,
+      description: extract(r, "description", ["description", "desc", "name"], ["desc"]),
+      unit: extract(r, "unit", ["unit", "uom", "measure"], ["unit"]),
+      vendor: extract(r, "vendor", ["vendor", "supplier"], ["vendor", "sup"]),
+      unit_price: toNum(extract(r, "unit_price", ["unitprice", "price", "cost"], ["price"])),
+      on_hand: toNum(extract(r, "on_hand", ["onhand", "stock", "inventory"], ["hand", "stock"])),
+      lead_time_weeks: toNum(extract(r, "lead_time_weeks", ["leadtime", "lt", "leadtimeweeks"], ["lead", "lt"])),
+      lot_size: toNum(extract(r, "lot_size", ["lotsize", "moq", "lot"], ["lot", "moq"]), 1),
+      safety_stock: toNum(extract(r, "safety_stock", ["safetystock", "ss"], ["safety", "ss"])),
+      safety_factor: toNum(extract(r, "safety_factor", ["safetyfactor", "sf"], ["factor"]), 1),
+      expiry_date: extract(r, "expiry_date", ["expirydate", "expiry", "expdate"], ["exp"])
+    };
+  });
 
   const childrenOf = {}; 
   const parentsOf = {}; 
   bom.forEach((r) => {
-    childrenOf[r.parent_item] = childrenOf[r.parent_item] || [];
-    childrenOf[r.parent_item].push({ component: r.component_item, qty_per: toNum(r.qty_per, 1) });
-    parentsOf[r.component_item] = parentsOf[r.component_item] || [];
-    parentsOf[r.component_item].push(r.parent_item);
+    let p = extract(r, "parent_item", ["parentitem", "parent", "assembly", "fg"], ["parent"]);
+    let c = extract(r, "component_item", ["componentitem", "component", "child", "part", "rm"], ["comp", "child"]);
+    let q = extract(r, "qty_per", ["qtyper", "qty", "quantity"], ["qty"]);
+    if (p && c) {
+      p = String(p).trim();
+      c = String(c).trim();
+      childrenOf[p] = childrenOf[p] || [];
+      childrenOf[p].push({ component: c, qty_per: toNum(q, 1) });
+      parentsOf[c] = parentsOf[c] || [];
+      parentsOf[c].push(p);
+    }
   });
 
   const allItems = new Set([
-    ...inventory.map((r) => r.item),
-    ...demand.map((r) => r.item),
-    ...bom.map((r) => r.parent_item),
-    ...bom.map((r) => r.component_item),
+    ...Object.keys(invByItem),
+    ...(demand || []).map(r => String(extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item", "part"]) || "").trim()).filter(Boolean),
+    ...Object.keys(childrenOf),
+    ...Object.keys(parentsOf),
   ]);
 
   const level = {};
@@ -185,12 +205,14 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
   while (changed && guard < allItems.size + 5) {
     changed = false;
     guard++;
-    bom.forEach((r) => {
-      const p = level[r.parent_item] ?? 0;
-      if ((level[r.component_item] ?? 0) < p + 1) {
-        level[r.component_item] = p + 1;
-        changed = true;
-      }
+    Object.entries(childrenOf).forEach(([p, kids]) => {
+      const pLevel = level[p] ?? 0;
+      kids.forEach(k => {
+        if ((level[k.component] ?? 0) < pLevel + 1) {
+          level[k.component] = pLevel + 1;
+          changed = true;
+        }
+      });
     });
   }
 
@@ -207,9 +229,17 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     return `${dd}/${mm}`;
   });
   const weekMondayDates = weeks.map((_, i) => new Date(startMonday.getTime() + (i - HW) * 7 * 86400000).toISOString().slice(0, 10));
-  demand.forEach((r) => {
-    const idx = parseWeekToIndex(r.week, startMonday) + HW;
-    if (idx >= 0 && idx < totalCols) grossReq[r.item][idx] += toNum(r.quantity);
+  
+  (demand || []).forEach((r) => {
+    let rawItem = extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item"]);
+    let rawWeek = extract(r, "week", ["week", "wk", "cw"], ["week"]);
+    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount"], ["qty", "quant"]);
+    if (!rawItem || rawWeek === undefined) return;
+    rawItem = String(rawItem).trim();
+    const idx = parseWeekToIndex(rawWeek, startMonday) + HW;
+    if (idx >= 0 && idx < totalCols && grossReq[rawItem]) {
+      grossReq[rawItem][idx] += toNum(rawQty);
+    }
   });
 
   const schedReceiptByItem = {};
@@ -220,49 +250,73 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     poPendingByItem[it] = new Array(totalCols).fill(0);
     gitByItem[it] = new Array(totalCols).fill(0);
   });
+  
   const poDetailsByItem = {};
   (poPending || []).forEach((r) => {
-    const idx = parseWeekToIndex(r.week, startMonday) + HW;
-    if (!poPendingByItem[r.item]) poPendingByItem[r.item] = new Array(totalCols).fill(0);
-    if (!schedReceiptByItem[r.item]) schedReceiptByItem[r.item] = new Array(totalCols).fill(0);
+    let rawItem = extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item"]);
+    let rawWeek = extract(r, "week", ["week", "wk", "cw"], ["week"]);
+    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount"], ["qty", "quant"]);
+    if (!rawItem || rawWeek === undefined) return;
+    rawItem = String(rawItem).trim();
+    const idx = parseWeekToIndex(rawWeek, startMonday) + HW;
+    if (!poPendingByItem[rawItem]) poPendingByItem[rawItem] = new Array(totalCols).fill(0);
+    if (!schedReceiptByItem[rawItem]) schedReceiptByItem[rawItem] = new Array(totalCols).fill(0);
     if (idx >= 0 && idx < totalCols) {
-      poPendingByItem[r.item][idx] += toNum(r.quantity);
-      schedReceiptByItem[r.item][idx] += toNum(r.quantity);
-      poDetailsByItem[r.item] = poDetailsByItem[r.item] || [];
-      poDetailsByItem[r.item].push({
-        poNumber: getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]) || "?",
-        vendor: getField(r, ["vendor", "vendorname", "supplier", "suppliername", "seller"], ["vendor", "supplier", "seller"]) || "",
-        quantity: toNum(r.quantity), weekIdx: idx, rawWeek: r.week,
+      poPendingByItem[rawItem][idx] += toNum(rawQty);
+      schedReceiptByItem[rawItem][idx] += toNum(rawQty);
+      poDetailsByItem[rawItem] = poDetailsByItem[rawItem] || [];
+      poDetailsByItem[rawItem].push({
+        poNumber: String(extract(r, "po_number", ["ponumber", "ponum", "po"], ["po", "doc"]) || "?").trim(),
+        vendor: String(extract(r, "vendor", ["vendor", "supplier"], ["vendor", "sup"]) || "").trim(),
+        quantity: toNum(rawQty), weekIdx: idx, rawWeek: rawWeek,
         weekLabel: weekLabels[idx], mondayDate: weekMondayDates[idx],
       });
     }
   });
   Object.values(poDetailsByItem).forEach((list) => list.sort((a, b) => a.weekIdx - b.weekIdx));
+  
   (git || []).forEach((r) => {
-    if (!gitByItem[r.item]) gitByItem[r.item] = new Array(totalCols).fill(0);
-    if (!schedReceiptByItem[r.item]) schedReceiptByItem[r.item] = new Array(totalCols).fill(0);
-    gitByItem[r.item][HW] += toNum(r.quantity);
-    schedReceiptByItem[r.item][HW] += toNum(r.quantity);
+    let rawItem = extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item"]);
+    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount"], ["qty", "quant"]);
+    if (!rawItem) return;
+    rawItem = String(rawItem).trim();
+    if (!gitByItem[rawItem]) gitByItem[rawItem] = new Array(totalCols).fill(0);
+    if (!schedReceiptByItem[rawItem]) schedReceiptByItem[rawItem] = new Array(totalCols).fill(0);
+    gitByItem[rawItem][HW] += toNum(rawQty);
+    schedReceiptByItem[rawItem][HW] += toNum(rawQty);
   });
 
   const actualByItem = {};
   order.forEach((it) => (actualByItem[it] = new Array(totalCols).fill(0)));
   (actualConsumption || []).forEach((r) => {
-    const idx = parseWeekToIndex(r.week, startMonday) + HW;
-    if (!actualByItem[r.item]) actualByItem[r.item] = new Array(totalCols).fill(0);
-    if (idx >= 0 && idx < totalCols) actualByItem[r.item][idx] += toNum(r.quantity);
+    let rawItem = extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item"]);
+    let rawWeek = extract(r, "week", ["week", "wk", "cw"], ["week"]);
+    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "actual", "usage"], ["qty", "quant"]);
+    if (!rawItem || rawWeek === undefined) return;
+    rawItem = String(rawItem).trim();
+    const idx = parseWeekToIndex(rawWeek, startMonday) + HW;
+    if (!actualByItem[rawItem]) actualByItem[rawItem] = new Array(totalCols).fill(0);
+    if (idx >= 0 && idx < totalCols) {
+      actualByItem[rawItem][idx] += toNum(rawQty);
+    }
   });
 
   const batchesByItem = {};
   (batches || []).forEach((r) => {
-    const qty = toNum(r.quantity);
-    const dateStr = (r.expiry_date || "").trim();
+    let rawItem = extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item"]);
+    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount"], ["qty", "quant"]);
+    let rawBatch = extract(r, "batch_no", ["batchno", "batch", "lotno", "lot"], ["batch", "lot"]);
+    let rawExpiry = extract(r, "expiry_date", ["expirydate", "expiry", "expdate", "exp"], ["exp"]);
+    if (!rawItem) return;
+    rawItem = String(rawItem).trim();
+    const qty = toNum(rawQty);
+    const dateStr = String(rawExpiry || "").trim();
     const expiryDate = dateStr ? new Date(dateStr + "T00:00:00Z") : null;
     const valid = expiryDate && !isNaN(expiryDate);
     const weeksToExpiry = valid ? Math.floor((expiryDate - startMonday) / (7 * 86400000)) : null;
-    batchesByItem[r.item] = batchesByItem[r.item] || [];
-    batchesByItem[r.item].push({
-      batchNo: r.batch_no || "?", quantity: qty, expiryDate: dateStr,
+    batchesByItem[rawItem] = batchesByItem[rawItem] || [];
+    batchesByItem[rawItem].push({
+      batchNo: String(rawBatch || "?").trim(), quantity: qty, expiryDate: dateStr,
       weeksToExpiry, expired: valid ? weeksToExpiry < 0 : false, expiringSoon: valid ? (weeksToExpiry >= 0 && weeksToExpiry <= 4) : false,
     });
   });
@@ -271,7 +325,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
   const records = {};
 
   order.forEach((item) => {
-    const inv = invByItem[item] || { on_hand: 0, lead_time_weeks: 0, lot_size: 1, safety_stock: 0, description: item };
+    const inv = invByItem[item] || { item: item, on_hand: 0, lead_time_weeks: 0, lot_size: 1, safety_stock: 0, description: item, unit: "EA", vendor: "", unit_price: 0, expiry_date: "" };
     const leadTime = Math.max(0, toNum(inv.lead_time_weeks, 0));
     const lotSize = Math.max(1, toNum(inv.lot_size, 1));
     const baseSafety = Math.max(0, toNum(inv.safety_stock, 0));
@@ -294,7 +348,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       expired = false;
       expiringSoon = false;
       weeksToExpiry = null;
-      expiryDateStr = (inv.expiry_date || "").trim();
+      expiryDateStr = String(inv.expiry_date || "").trim();
       if (expiryDateStr) {
         const expiryDate = new Date(expiryDateStr + "T00:00:00Z");
         if (!isNaN(expiryDate)) {
@@ -366,14 +420,13 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
 
     const actualCons = actualByItem[item] || new Array(totalCols).fill(0);
     const pastActualTotal = actualCons.slice(0, HW).reduce((a, b) => a + b, 0);
-    // คำนวณค่าเฉลี่ยต่อสัปดาห์ย้อนหลัง
     const pastActualAvg = HW > 0 ? pastActualTotal / HW : 0;
 
     records[item] = {
       item,
       description: inv.description || item,
       unit: inv.unit || "EA",
-      vendor: (inv.vendor || "").trim(),
+      vendor: String(inv.vendor || "").trim(),
       unitPrice: toNum(inv.unit_price, 0),
       level: level[item] || 0,
       leadTime,
@@ -888,13 +941,13 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                   // Variance Rendering
                   if (r.kind === "variance" && v !== null) {
                     if (v === 0 && rec.grossReq[i] === 0 && rec.actualConsumption[i] === 0) {
-                      bg = "transparent"; color = COLORS.inkSoft; // No activity
+                      bg = "transparent"; color = COLORS.inkSoft; 
                     } else if (Math.abs(v) < 0.5) { 
-                      bg = "#E3E9D6"; color = COLORS.moss; // Match plan
+                      bg = "#E3E9D6"; color = COLORS.moss; 
                     } else if (v > 0) { 
-                      bg = "#F3DDBC"; color = COLORS.amber; // Over consumed
+                      bg = "#F3DDBC"; color = COLORS.amber; 
                     } else { 
-                      bg = "#F6D9D3"; color = COLORS.rust; // Under consumed
+                      bg = "#F6D9D3"; color = COLORS.rust; 
                     }
                   }
 
@@ -1266,20 +1319,6 @@ export default function MRPDashboard() {
     }));
   };
 
-  const poPendingHeaderWarning = useMemo(() => {
-    if (!scheduledReceiptsPO.length) return null;
-    const headers = Object.keys(scheduledReceiptsPO[0]);
-    const strictCands = ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"];
-    const fallbackSubs = ["po", "ref", "doc"];
-    const exclude = new Set(["item", "week", "quantity", "qty", "status"]);
-    const matched = headers.some((h) => {
-      const norm = h.toLowerCase().replace(/[\s_\-#.]/g, "");
-      if (exclude.has(norm)) return false;
-      return strictCands.includes(norm) || fallbackSubs.some((s) => norm.includes(s));
-    });
-    return matched ? null : headers;
-  }, [scheduledReceiptsPO]);
-
   const vendorGroups = useMemo(() => {
     const map = {};
     order.forEach((it) => {
@@ -1447,16 +1486,6 @@ export default function MRPDashboard() {
         }}><Download size={12} /> template</button>
       </div>
 
-      {poPendingHeaderWarning && (
-        <div style={{
-          border: `1px solid ${COLORS.amber}`, background: "#F3DDBC", color: "#5C4419",
-          padding: "6px 12px", marginBottom: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
-        }}>
-          Couldn't find a PO number column in your PO Pending file — columns detected: {poPendingHeaderWarning.join(", ")}.
-          Rename one to "po_number" (or anything containing "po") and re-upload.
-        </div>
-      )}
-
       {/* KPIs */}
       <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
         <KPI label="Past due releases" value={kpis.pastDue} tone="rust" icon={CircleAlert} />
@@ -1548,7 +1577,7 @@ export default function MRPDashboard() {
       </div>
 
       <div style={{ marginTop: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft }}>
-        Note: planned orders round up to lot size; PO pending is netted against gross requirements in the week it's due, GIT is treated as arriving in week 1 (no date needed since it's already shipped). Expired on-hand stock is excluded from the plan (treated as 0). Actual consumption is compared against calculated gross requirements in the same week; variance only shows where actual data was entered. "Planned order release" cells and PO pending quantities are directly editable \u2014 type a new number to override the calculated plan (amber outline marks an override; click \u21ba to reset). Upload your own CSVs to replace the sample bicycle BOM.
+        Note: planned orders round up to lot size; PO pending is netted against gross requirements in the week it's due, GIT is treated as arriving in week 1 (no date needed since it's already shipped). Expired on-hand stock is excluded from the plan (treated as 0). Actual consumption is compared against calculated gross requirements in the same week; variance only shows where actual data was entered. "Planned order release" cells and PO pending quantities are directly editable \u2014 type a new number to override the calculated plan (amber outline marks an override; click \u21ba to reset).
       </div>
     </div>
   );
