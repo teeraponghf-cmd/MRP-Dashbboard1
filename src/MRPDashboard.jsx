@@ -27,22 +27,22 @@ const SAMPLE_INVENTORY = [
 ];
 
 const SAMPLE_DEMAND = [
-  // Historical Demand (Past 4 weeks) to generate variances
-  { item: "BIKE-100", week: -2, quantity: 20 },
-  { item: "BIKE-100", week: -1, quantity: 22 },
-  { item: "BIKE-100", week: 0, quantity: 25 },
+  // Historical Demand (Past weeks)
+  { item: "BIKE-100", week: "26CW27", quantity: 20 },
+  { item: "BIKE-100", week: "26CW28", quantity: 22 },
+  { item: "BIKE-100", week: "26CW29", quantity: 25 },
   // Future Demand
-  { item: "BIKE-100", week: 2, quantity: 20 },
-  { item: "BIKE-100", week: 4, quantity: 25 },
-  { item: "BIKE-100", week: 6, quantity: 30 },
-  { item: "BIKE-100", week: 8, quantity: 18 },
-  { item: "BIKE-100", week: 10, quantity: 22 },
-  { item: "SPOKE-STD", week: 3, quantity: 200 },
+  { item: "BIKE-100", week: "26CW32", quantity: 20 },
+  { item: "BIKE-100", week: "26CW34", quantity: 25 },
+  { item: "BIKE-100", week: "26CW36", quantity: 30 },
+  { item: "BIKE-100", week: "26CW38", quantity: 18 },
+  { item: "BIKE-100", week: "26CW40", quantity: 22 },
+  { item: "SPOKE-STD", week: "26CW33", quantity: 200 },
 ];
 
 const SAMPLE_PO_PENDING = [
-  { item: "CHAIN-STD", week: 2, quantity: 25, po_number: "TPO4471", vendor: "Shimano Trading Co." },
-  { item: "WHEEL-ASM", week: 1, quantity: 10, po_number: "TPO4455", vendor: "Taiwan Wheel Works" },
+  { item: "CHAIN-STD", week: "26CW32", quantity: 25, po_number: "TPO4471", vendor: "Shimano Trading Co." },
+  { item: "WHEEL-ASM", week: "26CW31", quantity: 10, po_number: "TPO4455", vendor: "Taiwan Wheel Works" },
 ];
 
 const SAMPLE_GIT = [
@@ -50,20 +50,19 @@ const SAMPLE_GIT = [
 ];
 
 const SAMPLE_ACTUAL_CONSUMPTION = [
-  { item: "BIKE-100", week: "26CW28", quantity: 20 },
-  { item: "BIKE-100", week: "26CW29", quantity: 22 },
-  { item: "BIKE-100", week: "26CW30", quantity: 28 }, // Example of over-consumption
+  { item: "BIKE-100", week: "26CW27", quantity: 20 },
+  { item: "BIKE-100", week: "26CW28", quantity: 22 },
+  { item: "BIKE-100", week: "26CW29", quantity: 28 },
   { item: "FRAME-STD", week: "26CW27", quantity: 20 },
   { item: "FRAME-STD", week: "26CW28", quantity: 25 },
   { item: "FRAME-STD", week: "26CW29", quantity: 18 },
   { item: "WHEEL-ASM", week: "26CW27", quantity: 40 },
   { item: "WHEEL-ASM", week: "26CW28", quantity: 50 },
-  { item: "WHEEL-ASM", week: "26CW29", quantity: 36 }, // Example of under-consumption
+  { item: "WHEEL-ASM", week: "26CW29", quantity: 36 },
   { item: "SPOKE-STD", week: "26CW27", quantity: 1280 },
   { item: "SPOKE-STD", week: "26CW28", quantity: 1600 },
   { item: "CHAIN-STD", week: "26CW27", quantity: 20 },
 ];
-
 
 const SAMPLE_BATCHES = [
   { item: "SPOKE-STD", batch_no: "SPK-B1", quantity: 300, expiry_date: "2026-07-01" },
@@ -150,7 +149,7 @@ function parseWeekToIndex(weekValue, startMonday) {
     return Math.round((target - startMonday) / (7 * 86400000));
   }
   const n = Number(s);
-  return Number.isFinite(n) ? n - 1 : 0; // week 1 = current, week 0 = -1 (last week)
+  return Number.isFinite(n) ? n - 1 : 0; 
 }
 
 // ---------- MRP engine ----------
@@ -347,11 +346,21 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       }
     }
 
+    // กระจายแผนไปยังชิ้นส่วนลูก
     const kids = childrenOf[item] || [];
     kids.forEach(({ component, qty_per }) => {
       grossReq[component] = grossReq[component] || new Array(totalCols).fill(0);
       for (let i = 0; i < totalCols; i++) {
-        grossReq[component][i] += (plannedRelease[i] || 0) * qty_per;
+        if (i < HW) {
+          // สัปดาห์อดีต: ดึง Gross Req จากแม่ ถอยหลังตาม Lead Time เพื่อเป็นแผนให้ชิ้นส่วนลูก
+          const pastReleaseIdx = i - leadTime;
+          if (pastReleaseIdx >= 0) {
+            grossReq[component][pastReleaseIdx] += (gr[i] || 0) * qty_per;
+          }
+        } else {
+          // สัปดาห์อนาคต: ดึงจาก Planned Release ของแม่
+          grossReq[component][i] += (plannedRelease[i] || 0) * qty_per;
+        }
       }
     });
 
@@ -389,7 +398,6 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       git: gitByItem[item] || new Array(horizon).fill(0),
       actualConsumption: actualCons,
       pastActualTotal,
-      // Variance: Calculate in history columns if i < HW, else null
       consumptionVariance: gr.map((v, i) => i < HW ? (actualCons[i] - v) : null),
       projOnHand,
       netReq,
@@ -864,7 +872,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                   let color = COLORS.ink;
                   let bg = "transparent";
                   if (r.kind === "poh" && v < 0) { color = "#fff"; bg = COLORS.rust; }
-                  else if (r.kind === "poh" && v < rec.safety) { bg = "#F3DDBC"; }
+                  else if (r.kind === "poh" && v !== null && v < rec.safety) { bg = "#F3DDBC"; }
                   if (r.kind === "prel" && v > 0 && rec.pastDue[i]) { color = "#fff"; bg = COLORS.rust; }
                   else if (r.kind === "prel" && v > 0) { bg = "#DCE7EE"; color = COLORS.steelDeep; }
                   if (r.kind === "po" && v > 0) { bg = "#F3DDBC"; color = COLORS.amber; }
@@ -1410,16 +1418,16 @@ export default function MRPDashboard() {
         <UploadSlot label="Inventory Master" hint="item, on_hand, lead_time_weeks, lot_size, safety_stock, safety_factor, vendor, unit_price, expiry_date"
           onFile={handleFile("inventory", setInventory)} loaded={loadedFlags.inventory} count={inventory.length}
           onSample={() => { setInventory(SAMPLE_INVENTORY); setLoadedFlags((f) => ({ ...f, inventory: false })); }} />
-        <UploadSlot label="Demand Schedule" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity"
+        <UploadSlot label="Demand Schedule" hint="item, week (e.g. 26CW25), quantity"
           onFile={handleFile("demand", setDemand)} loaded={loadedFlags.demand} count={demand.length}
           onSample={() => { setDemand(SAMPLE_DEMAND); setLoadedFlags((f) => ({ ...f, demand: false })); }} />
-        <UploadSlot label="Actual Consumption (เบิกจริง)" hint="item, week (0=last wk, -1=2 wks ago, or CW), qty"
+        <UploadSlot label="Actual Consumption (เบิกจริง)" hint="item, week (e.g. 26CW25), quantity"
           onFile={handleFile("actualConsumption", setActualConsumption)} loaded={loadedFlags.actualConsumption} count={actualConsumption.length}
           onSample={() => { setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setLoadedFlags((f) => ({ ...f, actualConsumption: false })); }} />
         <UploadSlot label="Batches / Lots (expiry)" hint="item, batch_no, quantity, expiry_date"
           onFile={handleFile("batches", setBatches)} loaded={loadedFlags.batches} count={batches.length}
           onSample={() => { setBatches(SAMPLE_BATCHES); setLoadedFlags((f) => ({ ...f, batches: false })); }} />
-        <UploadSlot label="PO Pending" hint="item, week (e.g. 26CW29 or 1,2,3...), quantity, po_number, vendor"
+        <UploadSlot label="PO Pending" hint="item, week (e.g. 26CW25), quantity, po_number, vendor"
           onFile={handlePoPendingFile} loaded={loadedFlags.poPending} count={scheduledReceiptsPO.length}
           onSample={() => { setScheduledReceiptsPO(SAMPLE_PO_PENDING); setScheduledReceiptsPOOriginal(SAMPLE_PO_PENDING); setLoadedFlags((f) => ({ ...f, poPending: false })); }} />
         <UploadSlot label="GIT (Goods In Transit)" hint="item, quantity (arrives this week, no date needed)"
