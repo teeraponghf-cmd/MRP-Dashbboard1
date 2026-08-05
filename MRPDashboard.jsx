@@ -28,6 +28,8 @@ const SAMPLE_INVENTORY = [
 
 const SAMPLE_DEMAND = [
   // Historical Demand (Past 4 weeks) ต้องมีเพื่อเป็นฐานเปรียบเทียบ Variance ให้ลูกๆ
+  { item: "BIKE-100", week: "26CW25", quantity: 15 },
+  { item: "BIKE-100", week: "26CW26", quantity: 12 },
   { item: "BIKE-100", week: "26CW27", quantity: 20 },
   { item: "BIKE-100", week: "26CW28", quantity: 22 },
   { item: "BIKE-100", week: "26CW29", quantity: 25 },
