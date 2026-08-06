@@ -147,7 +147,6 @@ function parseWeekToIndex(weekValue, startMonday) {
 }
 
 // ---------- MRP engine ----------
-// ---------- MRP engine ----------
 function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides }) {
   if (!Array.isArray(bom) || !Array.isArray(inventory)) {
     return { weeks: [], weekLabels: [], weekDates: [], weekMondayDates: [], records: {}, order: [], childrenOf: {}, historyWeeks: 0, warnings: {} };
@@ -388,20 +387,14 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     const sr = schedReceiptByItem[item] || new Array(totalCols).fill(0);
     const actualCons = actualByItem[item] || new Array(totalCols).fill(0);
 
-    // --- ประกาศตัวแปรคำนวณ Variance และค่าเฉลี่ยไว้ที่ต้นลูปอย่างถูกต้อง ---
-    let totalPastVarianceRatio = 0;
-    let activePastWeeksCount = 0;
-
+    // คำนวณสัดส่วนรวม (Aggregate Factor) จากอดีตอย่างปลอดภัย
+    let totalPastPlan = 0;
+    let totalPastActual = 0;
     for (let i = 0; i < HW; i++) {
-      const pastPlan = gr[i];
-      const pastAct = actualCons[i];
-      if (pastPlan > 0 || pastAct > 0) {
-        const ratio = pastPlan > 0 ? (pastAct / pastPlan) : 1;
-        totalPastVarianceRatio += ratio;
-        activePastWeeksCount++;
-      }
+      totalPastPlan += gr[i] || 0;
+      totalPastActual += actualCons[i] || 0;
     }
-    const avgVarianceRatio = activePastWeeksCount > 0 ? (totalPastVarianceRatio / activePastWeeksCount) : 1;
+    const consumptionFactor = totalPastPlan > 0 ? (totalPastActual / totalPastPlan) : 1;
 
     const pastActualTotal = actualCons.slice(0, HW).reduce((a, b) => a + b, 0);
     const pastActualAvg = HW > 0 ? pastActualTotal / HW : 0;
@@ -416,8 +409,9 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     for (let fi = 0; fi < horizon; fi++) {
       const i = HW + fi;
       
-      const adjustedGrossReq = (gr[i] || 0) * avgVarianceRatio;
-      const adjustedConsumption = adjustedGrossReq * safetyFactor;
+      // ปรับความต้องการในอนาคตด้วยสัดส่วนรวมที่เสถียร (จำกัดช่วงไม่ให้คลาดเคลื่อนเกินจริง เช่น 0.5x ถึง 2.0x ถ้าต้องการ หรือใช้ตามจริง)
+      const adjustedFactor = Math.max(0.5, Math.min(2.0, consumptionFactor));
+      const adjustedConsumption = (gr[i] || 0) * safetyFactor * adjustedFactor;
 
       let proj = onHandPrev + sr[i] - adjustedConsumption;
       let ordered = 0;
