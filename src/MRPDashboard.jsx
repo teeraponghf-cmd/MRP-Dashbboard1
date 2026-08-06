@@ -781,7 +781,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
     { label: "Gross requirements (calculated)", data: rec.grossReq, kind: "gr" },
     { label: `Consumption used for planning (\u00d7${rec.safetyFactor})`, data: rec.consumption, kind: "consumption" },
     { label: "Actual consumption (issued)", data: rec.actualConsumption, kind: "actual" },
-    { label: "Variance (actual \u2212 calculated)", data: rec.consumptionVariance, kind: "variance" },
+   { label: "Variance (Qty / %)", data: rec.consumptionVariance, kind: "variance" },
     { label: "PO pending", data: rec.poPending, kind: "po" },
     { label: "Goods in transit (GIT)", data: rec.git, kind: "git" },
     { label: "Projected on hand", data: rec.projOnHand, kind: "poh" },
@@ -1039,8 +1039,30 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                             }}
                           />
                         </div>
-                      ) : (
-                        v === null || v === undefined ? "—" : (r.kind === "variance" ? (v > 0 ? `+${Math.round(v)}` : Math.round(v)) : (v ? Math.round(v) : "—"))
+                     ) : (
+                        v === null || v === undefined ? "—" : (r.kind === "variance" ? (
+                          (() => {
+                            const plan = rec.grossReq[i];
+                            const act = rec.actualConsumption[i];
+                            if (plan === 0 && act === 0) return "0";
+                            
+                            let pctStr = "";
+                            if (plan === 0 && act > 0) {
+                              pctStr = "+\u221E%"; // กรณีไม่มีแผน แต่มีการเบิกจริง (Infinity)
+                            } else {
+                              const pct = (v / plan) * 100;
+                              pctStr = pct > 0 ? `+${pct.toFixed(1)}%` : `${pct.toFixed(1)}%`;
+                            }
+                            const qtyStr = v > 0 ? `+${Math.round(v)}` : Math.round(v);
+                            
+                            return (
+                              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", lineHeight: "1.1" }}>
+                                <span>{qtyStr}</span>
+                                <span style={{ fontSize: 9, opacity: 0.8, fontWeight: 500 }}>{pctStr}</span>
+                              </div>
+                            );
+                          })()
+                        ) : (v ? Math.round(v) : "—"))
                       )}
                     </td>
                   );
