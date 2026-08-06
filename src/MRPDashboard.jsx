@@ -189,12 +189,44 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     }
   });
 
+  const demandItemsSet = new Set();
+  
   const allItems = new Set([
     ...Object.keys(invByItem),
-    ...(demand || []).map(r => String(extract(r, "item", ["item", "part", "รหัส"], ["item"]) || "").trim().toUpperCase()).filter(Boolean),
+    ...(demand || []).map(r => {
+      let rawItem = extract(r, "item", ["item", "part", "รหัส"], ["item"]);
+      let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "จำนวน"], ["qty", "quant"]);
+      if (rawItem) {
+        let it = String(rawItem).trim().toUpperCase();
+        if (toNum(rawQty) > 0) demandItemsSet.add(it); // จับตาดูไอเทมที่มี Demand ยอด > 0
+        return it;
+      }
+      return "";
+    }).filter(Boolean),
     ...Object.keys(childrenOf),
     ...Object.keys(parentsOf),
   ]);
+
+  // --- DATA VALIDATION (ตรวจสอบข้อมูล) ---
+  const warnings = {
+    demandWithoutBOM: [],
+    missingInventory: []
+  };
+
+  // 1. หาไอเทมที่อยู่ใน Demand แต่ไม่มี BOM (อาจจะเป็น Order วัตถุดิบตรงๆ หรือลืมใส่ BOM FG)
+  Array.from(demandItemsSet).forEach(item => {
+    if (!childrenOf[item] || childrenOf[item].length === 0) {
+      warnings.demandWithoutBOM.push(item);
+    }
+  });
+
+  // 2. หาไอเทมที่อยู่ในโครงสร้าง MRP แต่หาในไฟล์ Inventory ไม่เจอ
+  Array.from(allItems).forEach(item => {
+    if (!invByItem[item]) {
+      warnings.missingInventory.push(item);
+    }
+  });
+  // ----------------------------------------
 
   const level = {};
   allItems.forEach((it) => (level[it] = 0));
@@ -372,17 +404,13 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       let proj = onHandPrev + sr[i] - consumption[i];
       let ordered = 0;
 
-      // 1. ตรวจสอบว่ามีการแก้ไข Manual Override สำหรับ Release ที่จะมาส่งในสัปดาห์นี้หรือไม่
       const releaseIdx = i - leadTime;
       const overrideKey = `${item}::${releaseIdx}`;
 
       if (planOverrides && planOverrides[overrideKey] !== undefined) {
-         // ถ้ายูสเซอร์กรอก Override เข้ามา ให้ยึดตามตัวเลขของยูสเซอร์เป็นหลัก (สะท้อน Proj On Hand ทันที)
          ordered = planOverrides[overrideKey];
       } else {
-         // 2. ถ้าไม่มีการ Override ให้คำนวณ Shortage สั่งของอัตโนมัติตามปกติ
          if (proj < safety) {
-           // ป้องกันของ Past-due ตีกัน: ถ้ายูสเซอร์ Override สัปดาห์ปัจจุบัน (HW) ไปแล้ว จะหยุดสร้าง order ย้อนหลังเวทมนตร์ให้
            if (releaseIdx < HW && planOverrides && planOverrides[`${item}::${HW}`] !== undefined) {
                ordered = 0;
            } else {
@@ -395,12 +423,10 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       plannedReceipt[i] = ordered;
       proj += ordered;
       projOnHand[i] = proj;
-      // Net Req แสดงยอดขาดจริงก่อนที่จะรับของเข้า
       netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - consumption[i]));
       onHandPrev = proj;
     }
 
-    // คำนวณ Planned Release ตามปกติ
     const calcPlannedRelease = new Array(totalCols).fill(0);
     for (let fi = 0; fi < horizon; fi++) {
       const i = HW + fi;
@@ -415,13 +441,11 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       }
     }
 
-    // สร้างตาราง Final Planned Release เพื่อส่งต่อยอด Override ให้ชิ้นส่วนลูก
     const finalPlannedRelease = calcPlannedRelease.map((v, idx) => {
       const key = `${item}::${idx}`;
       return planOverrides && planOverrides[key] !== undefined ? planOverrides[key] : v;
     });
 
-    // กระจายแผนไปยังชิ้นส่วนลูก (Dependent Demand)
     const kids = childrenOf[item] || [];
     kids.forEach(({ component, qty_per }) => {
       grossReq[component] = grossReq[component] || new Array(totalCols).fill(0);
@@ -486,7 +510,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     };
   });
 
-  return { weeks, weekLabels, weekDates, weekMondayDates, records, order, childrenOf, historyWeeks: HW };
+  return { weeks, weekLabels, weekDates, weekMondayDates, records, order, childrenOf, historyWeeks: HW, warnings };
 }
 
 // ---------- Storage adapter ----------
@@ -1242,7 +1266,7 @@ export default function MRPDashboard() {
     });
   }, []);
 
-  const { weeks, weekLabels, weekDates, records, order, childrenOf } = useMemo(
+  const { weeks, weekLabels, weekDates, records, order, childrenOf, warnings } = useMemo(
     () => runMRP({ bom, inventory, demand, poPending: scheduledReceiptsPO, git: scheduledReceiptsGIT, actualConsumption, batches, horizon, historyWeeks, planOverrides }),
     [bom, inventory, demand, scheduledReceiptsPO, scheduledReceiptsGIT, actualConsumption, batches, horizon, historyWeeks, planOverrides]
   );
@@ -1508,6 +1532,28 @@ export default function MRPDashboard() {
         }}>
           Couldn't find a PO number column in your PO Pending file — columns detected: {poPendingHeaderWarning.join(", ")}.
           Rename one to "po_number" (or anything containing "po") and re-upload.
+        </div>
+      )}
+
+      {/* Data Validation Warnings */}
+      {warnings && (warnings.demandWithoutBOM.length > 0 || warnings.missingInventory.length > 0) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          {warnings.demandWithoutBOM.length > 0 && (
+            <div style={{ background: '#F3DDBC', border: `1px solid ${COLORS.amber}`, padding: '8px 12px', color: '#5C4419', fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <AlertTriangle size={14} color={COLORS.amber} style={{ minWidth: 14 }} />
+              <span>
+                <strong>ตรวจสอบข้อมูล:</strong> พบรายการที่มีแผนผลิต (Demand) แต่ไม่มีโครงสร้าง BOM ในระบบ: <b>{warnings.demandWithoutBOM.join(", ")}</b> <i>(หากเป็นสินค้าซื้อมาขายไป หรืออะไหล่ สามารถข้ามได้)</i>
+              </span>
+            </div>
+          )}
+          {warnings.missingInventory.length > 0 && (
+            <div style={{ background: '#F6D9D3', border: `1px solid ${COLORS.rust}`, padding: '8px 12px', color: '#6A2B1D', fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <CircleAlert size={14} color={COLORS.rust} style={{ minWidth: 14 }} />
+              <span>
+                <strong>ข้อมูล Master ขาดหาย:</strong> พบรายการเหล่านี้อยู่ในโครงสร้าง BOM หรือ Demand แต่ไม่มีรายชื่ออยู่ใน Inventory Master: <b>{warnings.missingInventory.join(", ")}</b>
+              </span>
+            </div>
+          )}
         </div>
       )}
 
