@@ -9,7 +9,7 @@ const SAMPLE_BOM = [
   { parent_item: "BIKE-100", component_item: "DRIVETRAIN-KIT", qty_per: 1 },
   { parent_item: "WHEEL-ASM", component_item: "RIM-26", qty_per: 1 },
   { parent_item: "WHEEL-ASM", component_item: "HUB-STD", qty_per: 1 },
-  { parent_item: "WHEEL-ASM", component_item: "SPOKE-STD", qty_per: 32 },
+  { parent_item: "WHEEL-ASM", component_item: "14000133", qty_per: 32 },
   { parent_item: "DRIVETRAIN-KIT", component_item: "CHAIN-STD", qty_per: 1 },
   { parent_item: "DRIVETRAIN-KIT", component_item: "CRANKSET", qty_per: 1 },
 ];
@@ -21,7 +21,6 @@ const SAMPLE_INVENTORY = [
   { item: "DRIVETRAIN-KIT", description: "Drivetrain kit", unit: "EA", vendor: "GearForge Ltd.", unit_price: 35, on_hand: 25, lead_time_weeks: 2, lot_size: 15, safety_stock: 6, safety_factor: 1, expiry_date: "" },
   { item: "RIM-26", description: "26in alloy rim", unit: "EA", vendor: "Apex Metal Works", unit_price: 9.5, on_hand: 60, lead_time_weeks: 2, lot_size: 50, safety_stock: 20, safety_factor: 1, expiry_date: "" },
   { item: "HUB-STD", description: "Standard hub", unit: "EA", vendor: "SpinCraft Wheels Co.", unit_price: 6.2, on_hand: 45, lead_time_weeks: 2, lot_size: 40, safety_stock: 15, safety_factor: 1, expiry_date: "" },
-  { item: "SPOKE-STD", description: "Steel spoke", unit: "PCS", vendor: "Apex Metal Works", unit_price: 0.15, on_hand: 900, lead_time_weeks: 1, lot_size: 1000, safety_stock: 300, safety_factor: 1, expiry_date: "" },
   { item: "CHAIN-STD", description: "Standard chain, pre-lubed", unit: "EA", vendor: "GearForge Ltd.", unit_price: 4.8, on_hand: 20, lead_time_weeks: 4, lot_size: 25, safety_stock: 10, safety_factor: 1.5, expiry_date: "" },
   { item: "CRANKSET", description: "Crankset, forged", unit: "EA", vendor: "GearForge Ltd.", unit_price: 12.5, on_hand: 18, lead_time_weeks: 4, lot_size: 20, safety_stock: 8, safety_factor: 1, expiry_date: "" },
 ];
@@ -35,7 +34,7 @@ const SAMPLE_DEMAND = [
   { item: "BIKE-100", week: "26CW36", quantity: 30 },
   { item: "BIKE-100", week: "26CW38", quantity: 18 },
   { item: "BIKE-100", week: "26CW40", quantity: 22 },
-  { item: "SPOKE-STD", week: "26CW33", quantity: 200 },
+  { item: "14000133", week: "26CW33", quantity: 200 },
 ];
 
 const SAMPLE_PO_PENDING = [
@@ -57,14 +56,14 @@ const SAMPLE_ACTUAL_CONSUMPTION = [
   { item: "WHEEL-ASM", week: "26CW27", quantity: 40 },
   { item: "WHEEL-ASM", week: "26CW28", quantity: 50 },
   { item: "WHEEL-ASM", week: "26CW29", quantity: 36 },
-  { item: "SPOKE-STD", week: "26CW27", quantity: 1280 }, // ตัวอย่างเลขหลักพัน
-  { item: "SPOKE-STD", week: "26CW28", quantity: 1600 },
+  { item: "14000133", week: "26CW27", quantity: 1280 },
+  { item: "14000133", week: "26CW28", quantity: 1600 },
   { item: "CHAIN-STD", week: "26CW27", quantity: 20 },
 ];
 
 const SAMPLE_BATCHES = [
-  { item: "SPOKE-STD", batch_no: "SPK-B1", quantity: 300, expiry_date: "2026-07-01" },
-  { item: "SPOKE-STD", batch_no: "SPK-B2", quantity: 600, expiry_date: "2026-11-01" },
+  { item: "14000133", batch_no: "SPK-B1", quantity: 300, expiry_date: "2026-07-01" },
+  { item: "14000133", batch_no: "SPK-B2", quantity: 600, expiry_date: "2026-11-01" },
   { item: "CHAIN-STD", batch_no: "CHN-B1", quantity: 8, expiry_date: "2026-07-28" },
   { item: "CHAIN-STD", batch_no: "CHN-B2", quantity: 12, expiry_date: "2026-12-01" },
 ];
@@ -73,7 +72,6 @@ const SAMPLE_BATCHES = [
 function toNum(v, fallback = 0) {
   if (v === undefined || v === null) return fallback;
   if (typeof v === 'number') return isNaN(v) ? fallback : v;
-  // ลบเครื่องหมาย Comma เวลา Export จาก Excel (เช่น 1,280 -> 1280)
   const str = String(v).replace(/,/g, '').trim();
   const n = Number(str);
   return Number.isFinite(n) ? n : fallback;
@@ -81,8 +79,7 @@ function toNum(v, fallback = 0) {
 
 function getField(row, candidates, fallbackSubstrings) {
   for (const key of Object.keys(row)) {
-    // ลบอักขระล่องหน (BOM) และช่องว่างทั้งหมด ให้เหลือแค่ a-z และ 0-9
-    const norm = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const norm = key.toLowerCase().replace(/[\s_\-#.()]/g, "");
     for (const cand of candidates) {
       if (norm === cand) {
         const v = row[key];
@@ -92,7 +89,7 @@ function getField(row, candidates, fallbackSubstrings) {
   }
   if (fallbackSubstrings) {
     for (const key of Object.keys(row)) {
-      const norm = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const norm = key.toLowerCase().replace(/[\s_\-#.()]/g, "");
       for (const sub of fallbackSubstrings) {
         if (norm.includes(sub)) {
           const v = row[key];
@@ -150,23 +147,23 @@ function parseWeekToIndex(weekValue, startMonday) {
 }
 
 // ---------- MRP engine ----------
-function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, batches, horizon, historyWeeks }) {
+function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides }) {
   const HW = Math.max(0, historyWeeks || 0);
   const totalCols = HW + horizon;
   const weeks = Array.from({ length: totalCols }, (_, i) => i + 1);
   
   const invByItem = {};
   inventory.forEach((r) => {
-    let rawItem = extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item", "part"]);
+    let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item", "part", "รหัส"]);
     if (!rawItem) return;
-    rawItem = String(rawItem).trim();
+    rawItem = String(rawItem).trim().toUpperCase();
     invByItem[rawItem] = {
       item: rawItem,
-      description: extract(r, "description", ["description", "desc", "name"], ["desc"]),
-      unit: extract(r, "unit", ["unit", "uom", "measure"], ["unit"]),
-      vendor: extract(r, "vendor", ["vendor", "supplier"], ["vendor", "sup"]),
-      unit_price: toNum(extract(r, "unit_price", ["unitprice", "price", "cost"], ["price"])),
-      on_hand: toNum(extract(r, "on_hand", ["onhand", "stock", "inventory"], ["hand", "stock"])),
+      description: extract(r, "description", ["description", "desc", "name", "ชื่อ"], ["desc", "ชื่อ"]),
+      unit: extract(r, "unit", ["unit", "uom", "measure", "หน่วย"], ["unit", "uom"]),
+      vendor: extract(r, "vendor", ["vendor", "supplier", "ผู้ขาย"], ["vendor", "sup"]),
+      unit_price: toNum(extract(r, "unit_price", ["unitprice", "price", "cost", "ราคา"], ["price"])),
+      on_hand: toNum(extract(r, "on_hand", ["onhand", "stock", "inventory", "คงคลัง"], ["hand", "stock"])),
       lead_time_weeks: toNum(extract(r, "lead_time_weeks", ["leadtime", "lt", "leadtimeweeks"], ["lead", "lt"])),
       lot_size: toNum(extract(r, "lot_size", ["lotsize", "moq", "lot"], ["lot", "moq"]), 1),
       safety_stock: toNum(extract(r, "safety_stock", ["safetystock", "ss"], ["safety", "ss"])),
@@ -178,12 +175,12 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
   const childrenOf = {}; 
   const parentsOf = {}; 
   bom.forEach((r) => {
-    let p = extract(r, "parent_item", ["parentitem", "parent", "assembly", "fg"], ["parent"]);
-    let c = extract(r, "component_item", ["componentitem", "component", "child", "part", "rm"], ["comp", "child"]);
-    let q = extract(r, "qty_per", ["qtyper", "qty", "quantity"], ["qty"]);
+    let p = extract(r, "parent_item", ["parentitem", "parent", "assembly", "fg", "แม่"], ["parent"]);
+    let c = extract(r, "component_item", ["componentitem", "component", "child", "part", "rm", "ลูก"], ["comp", "child"]);
+    let q = extract(r, "qty_per", ["qtyper", "qty", "quantity", "จำนวน"], ["qty"]);
     if (p && c) {
-      p = String(p).trim();
-      c = String(c).trim();
+      p = String(p).trim().toUpperCase();
+      c = String(c).trim().toUpperCase();
       childrenOf[p] = childrenOf[p] || [];
       childrenOf[p].push({ component: c, qty_per: toNum(q, 1) });
       parentsOf[c] = parentsOf[c] || [];
@@ -191,12 +188,42 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     }
   });
 
+  const demandItemsSet = new Set();
+  
   const allItems = new Set([
     ...Object.keys(invByItem),
-    ...(demand || []).map(r => String(extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item", "part"]) || "").trim()).filter(Boolean),
+    ...(demand || []).map(r => {
+      let rawItem = extract(r, "item", ["item", "part", "รหัส"], ["item"]);
+      let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "จำนวน"], ["qty", "quant"]);
+      if (rawItem) {
+        let it = String(rawItem).trim().toUpperCase();
+        if (toNum(rawQty) > 0) demandItemsSet.add(it);
+        return it;
+      }
+      return "";
+    }).filter(Boolean),
     ...Object.keys(childrenOf),
     ...Object.keys(parentsOf),
   ]);
+
+  // --- DATA VALIDATION ---
+  const warnings = {
+    demandWithoutBOM: [],
+    missingInventory: []
+  };
+
+  Array.from(demandItemsSet).forEach(item => {
+    if (!childrenOf[item] || childrenOf[item].length === 0) {
+      warnings.demandWithoutBOM.push(item);
+    }
+  });
+
+  Array.from(allItems).forEach(item => {
+    if (!invByItem[item] && /^\d+$/.test(item)) {
+      warnings.missingInventory.push(item);
+    }
+  });
+  // -----------------------
 
   const level = {};
   allItems.forEach((it) => (level[it] = 0));
@@ -231,11 +258,11 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
   const weekMondayDates = weeks.map((_, i) => new Date(startMonday.getTime() + (i - HW) * 7 * 86400000).toISOString().slice(0, 10));
   
   (demand || []).forEach((r) => {
-    let rawItem = extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item"]);
-    let rawWeek = extract(r, "week", ["week", "wk", "cw"], ["week"]);
-    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount"], ["qty", "quant"]);
+    let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item"]);
+    let rawWeek = extract(r, "week", ["week", "wk", "cw", "สัปดาห์"], ["week"]);
+    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "จำนวน"], ["qty", "quant"]);
     if (!rawItem || rawWeek === undefined) return;
-    rawItem = String(rawItem).trim();
+    rawItem = String(rawItem).trim().toUpperCase();
     const idx = parseWeekToIndex(rawWeek, startMonday) + HW;
     if (idx >= 0 && idx < totalCols && grossReq[rawItem]) {
       grossReq[rawItem][idx] += toNum(rawQty);
@@ -253,11 +280,11 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
   
   const poDetailsByItem = {};
   (poPending || []).forEach((r) => {
-    let rawItem = extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item"]);
-    let rawWeek = extract(r, "week", ["week", "wk", "cw"], ["week"]);
-    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount"], ["qty", "quant"]);
+    let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item"]);
+    let rawWeek = extract(r, "week", ["week", "wk", "cw", "สัปดาห์"], ["week"]);
+    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "จำนวน"], ["qty", "quant"]);
     if (!rawItem || rawWeek === undefined) return;
-    rawItem = String(rawItem).trim();
+    rawItem = String(rawItem).trim().toUpperCase();
     const idx = parseWeekToIndex(rawWeek, startMonday) + HW;
     if (!poPendingByItem[rawItem]) poPendingByItem[rawItem] = new Array(totalCols).fill(0);
     if (!schedReceiptByItem[rawItem]) schedReceiptByItem[rawItem] = new Array(totalCols).fill(0);
@@ -266,8 +293,8 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       schedReceiptByItem[rawItem][idx] += toNum(rawQty);
       poDetailsByItem[rawItem] = poDetailsByItem[rawItem] || [];
       poDetailsByItem[rawItem].push({
-        poNumber: String(extract(r, "po_number", ["ponumber", "ponum", "po"], ["po", "doc"]) || "?").trim(),
-        vendor: String(extract(r, "vendor", ["vendor", "supplier"], ["vendor", "sup"]) || "").trim(),
+        poNumber: String(extract(r, "po_number", ["ponumber", "ponum", "po", "เลขที่po"], ["po", "doc"]) || "?").trim(),
+        vendor: String(extract(r, "vendor", ["vendor", "supplier", "ผู้ขาย"], ["vendor", "sup"]) || "").trim(),
         quantity: toNum(rawQty), weekIdx: idx, rawWeek: rawWeek,
         weekLabel: weekLabels[idx], mondayDate: weekMondayDates[idx],
       });
@@ -276,10 +303,10 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
   Object.values(poDetailsByItem).forEach((list) => list.sort((a, b) => a.weekIdx - b.weekIdx));
   
   (git || []).forEach((r) => {
-    let rawItem = extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item"]);
-    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount"], ["qty", "quant"]);
+    let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item"]);
+    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "จำนวน"], ["qty", "quant"]);
     if (!rawItem) return;
-    rawItem = String(rawItem).trim();
+    rawItem = String(rawItem).trim().toUpperCase();
     if (!gitByItem[rawItem]) gitByItem[rawItem] = new Array(totalCols).fill(0);
     if (!schedReceiptByItem[rawItem]) schedReceiptByItem[rawItem] = new Array(totalCols).fill(0);
     gitByItem[rawItem][HW] += toNum(rawQty);
@@ -289,11 +316,11 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
   const actualByItem = {};
   order.forEach((it) => (actualByItem[it] = new Array(totalCols).fill(0)));
   (actualConsumption || []).forEach((r) => {
-    let rawItem = extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item"]);
-    let rawWeek = extract(r, "week", ["week", "wk", "cw"], ["week"]);
-    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "actual", "usage"], ["qty", "quant"]);
+    let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item", "part"]);
+    let rawWeek = extract(r, "week", ["week", "wk", "cw", "สัปดาห์"], ["week", "cw"]);
+    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "actual", "usage", "เบิกจริง", "ยอดเบิก"], ["qty", "quant", "act", "เบิก", "issue"]);
     if (!rawItem || rawWeek === undefined) return;
-    rawItem = String(rawItem).trim();
+    rawItem = String(rawItem).trim().toUpperCase();
     const idx = parseWeekToIndex(rawWeek, startMonday) + HW;
     if (!actualByItem[rawItem]) actualByItem[rawItem] = new Array(totalCols).fill(0);
     if (idx >= 0 && idx < totalCols) {
@@ -303,12 +330,12 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
 
   const batchesByItem = {};
   (batches || []).forEach((r) => {
-    let rawItem = extract(r, "item", ["item", "part", "material", "itemno", "partno"], ["item"]);
-    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount"], ["qty", "quant"]);
-    let rawBatch = extract(r, "batch_no", ["batchno", "batch", "lotno", "lot"], ["batch", "lot"]);
-    let rawExpiry = extract(r, "expiry_date", ["expirydate", "expiry", "expdate", "exp"], ["exp"]);
+    let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item"]);
+    let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "จำนวน"], ["qty", "quant"]);
+    let rawBatch = extract(r, "batch_no", ["batchno", "batch", "lotno", "lot", "รุ่น"], ["batch", "lot"]);
+    let rawExpiry = extract(r, "expiry_date", ["expirydate", "expiry", "expdate", "exp", "หมดอายุ"], ["exp"]);
     if (!rawItem) return;
-    rawItem = String(rawItem).trim();
+    rawItem = String(rawItem).trim().toUpperCase();
     const qty = toNum(rawQty);
     const dateStr = String(rawExpiry || "").trim();
     const expiryDate = dateStr ? new Date(dateStr + "T00:00:00Z") : null;
@@ -366,7 +393,6 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     const projOnHand = new Array(totalCols).fill(null);
     const netReq = new Array(totalCols).fill(null);
     const plannedReceipt = new Array(totalCols).fill(null);
-    const plannedRelease = new Array(totalCols).fill(null);
     const pastDue = new Array(totalCols).fill(false);
 
     let onHandPrev = effectiveOnHand;
@@ -374,35 +400,50 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       const i = HW + fi;
       let proj = onHandPrev + sr[i] - consumption[i];
       let ordered = 0;
-      if (proj < safety) {
-        const need = safety - proj;
-        ordered = Math.ceil(need / lotSize) * lotSize;
-        proj += ordered;
+
+      const releaseIdx = i - leadTime;
+      const overrideReceiptKey = `${item}::${i}`;
+
+      // ถ้ายูสเซอร์กรอก Receipt ทับเข้ามา ให้ยึดค่านั้นเป็นหลักเลย
+      if (receiptOverrides && receiptOverrides[overrideReceiptKey] !== undefined) {
+         ordered = receiptOverrides[overrideReceiptKey];
+      } else {
+         if (proj < safety) {
+           if (releaseIdx < HW && planOverrides && planOverrides[`${item}::${HW}`] !== undefined) {
+               ordered = 0;
+           } else {
+               const need = safety - proj;
+               ordered = Math.ceil(need / lotSize) * lotSize;
+           }
+         }
       }
+
       plannedReceipt[i] = ordered;
+      proj += ordered;
       projOnHand[i] = proj;
       netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - consumption[i]));
       onHandPrev = proj;
     }
-    for (let fi = 0; fi < horizon; fi++) {
-      const i = HW + fi;
-      plannedRelease[i] = 0;
-    }
 
+    const calcPlannedRelease = new Array(totalCols).fill(0);
     for (let fi = 0; fi < horizon; fi++) {
       const i = HW + fi;
       if (plannedReceipt[i] > 0) {
         const releaseIdx = i - leadTime;
         if (releaseIdx >= HW) {
-          plannedRelease[releaseIdx] += plannedReceipt[i];
+          calcPlannedRelease[releaseIdx] += plannedReceipt[i];
         } else {
-          plannedRelease[HW] += plannedReceipt[i];
+          calcPlannedRelease[HW] += plannedReceipt[i];
           pastDue[HW] = true;
         }
       }
     }
 
-    // กระจายแผนไปยังชิ้นส่วนลูก
+    const finalPlannedRelease = calcPlannedRelease.map((v, idx) => {
+      const key = `${item}::${idx}`;
+      return planOverrides && planOverrides[key] !== undefined ? planOverrides[key] : v;
+    });
+
     const kids = childrenOf[item] || [];
     kids.forEach(({ component, qty_per }) => {
       grossReq[component] = grossReq[component] || new Array(totalCols).fill(0);
@@ -413,7 +454,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
             grossReq[component][pastReleaseIdx] += (gr[i] || 0) * qty_per;
           }
         } else {
-          grossReq[component][i] += (plannedRelease[i] || 0) * qty_per;
+          grossReq[component][i] += (finalPlannedRelease[i] || 0) * qty_per;
         }
       }
     });
@@ -458,7 +499,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       projOnHand,
       netReq,
       plannedReceipt,
-      plannedRelease,
+      plannedRelease: finalPlannedRelease,
       pastDue,
       hasParents: !!parentsOf[item],
       parentsCount: (parentsOf[item] || []).length,
@@ -467,7 +508,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     };
   });
 
-  return { weeks, weekLabels, weekDates, weekMondayDates, records, order, childrenOf, historyWeeks: HW };
+  return { weeks, weekLabels, weekDates, weekMondayDates, records, order, childrenOf, historyWeeks: HW, warnings };
 }
 
 // ---------- Storage adapter ----------
@@ -734,7 +775,7 @@ function VendorGroupTree({ groups, records, selected, onSelect, onlyWithOrders, 
   );
 }
 
-function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustPlan, onResetPlanOverride, onAdjustPOQty, poOriginalQtyMap, onResetPOQty, onAdjustPOWeek, onResetPOWeek, poOriginalMap }) {
+function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustPlan, onResetPlanOverride, onAdjustReceipt, onResetReceiptOverride, onAdjustPOQty, poOriginalQtyMap, onResetPOQty, onAdjustPOWeek, onResetPOWeek, poOriginalMap, planOverrides, receiptOverrides }) {
   if (!rec) return null;
   const rows = [
     { label: "Gross requirements (calculated)", data: rec.grossReq, kind: "gr" },
@@ -902,7 +943,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
           </table>
         </div>
       )}
-      <div style={{ overflowX: "auto" }}>
+      <div style={{ overflowX: "auto", paddingBottom: "12px" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 }}>
           <thead>
             <tr>
@@ -951,29 +992,47 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                     }
                   }
 
-                  const isOverridden = r.kind === "prel" && rec.plannedReleaseOriginal && rec.plannedReleaseOriginal[i] !== v;
+                  const isOverriddenPrel = r.kind === "prel" && planOverrides && planOverrides[`${rec.item}::${i}`] !== undefined;
+                  const isOverriddenPor = r.kind === "por" && receiptOverrides && receiptOverrides[`${rec.item}::${i}`] !== undefined;
+                  const isOverridden = isOverriddenPrel || isOverriddenPor;
+
                   const isPast = i < historyWeeks;
                   const isEditablePrel = r.kind === "prel" && !isPast;
+                  const isEditablePor = r.kind === "por" && !isPast;
+                  const isEditable = isEditablePrel || isEditablePor;
+                  
+                  let displayVal = "";
+                  if (isEditable) {
+                    displayVal = isOverridden ? v : (v ? Math.round(v) : "");
+                  }
+
+                  const onAdjust = r.kind === "prel" ? onAdjustPlan : onAdjustReceipt;
+                  const onReset = r.kind === "prel" ? onResetPlanOverride : onResetReceiptOverride;
+                  const tooltipMsg = r.kind === "prel" 
+                    ? `LT = ${rec.leadTime} wk \u2192 Arrives: ${i + rec.leadTime < weeks.length ? weekLabels[i + rec.leadTime] : "Out of horizon"}`
+                    : `Receipt in ${weekLabels[i]} \u2192 Pushes On-Hand up`;
+
                   return (
                     <td key={i} style={{
-                      textAlign: "right", padding: r.kind === "prel" ? "3px 4px" : "6px 8px", borderTop: `1px solid ${COLORS.paperLine}`,
+                      textAlign: "right", padding: isEditable ? "3px 4px" : "6px 8px", borderTop: `1px solid ${COLORS.paperLine}`,
                       borderLeft: i === historyWeeks ? `2px solid ${COLORS.steel}` : `1px solid ${COLORS.paperLine}`,
                       color, background: isPast && bg === "transparent" ? "#F1F1EA" : bg,
                       outline: isOverridden ? `2px solid ${COLORS.amber}` : "none", outlineOffset: "-2px",
                     }}>
-                      {isEditablePrel ? (
+                      {isEditable ? (
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2 }}>
                           {isOverridden && (
-                            <button onClick={() => onResetPlanOverride(rec.item, i)} title="reset to calculated value" style={{
+                            <button onClick={() => onReset(rec.item, i)} title="reset to calculated value" style={{
                               border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
                               fontSize: 9, padding: 0, lineHeight: 1,
                             }}>&#8635;</button>
                           )}
                           <input
                             type="number" min={0}
-                            value={v || ""}
-                            placeholder="\u2014"
-                            onChange={(e) => onAdjustPlan(rec.item, i, e.target.value)}
+                            value={displayVal}
+                            placeholder="—"
+                            title={tooltipMsg}
+                            onChange={(e) => onAdjust(rec.item, i, e.target.value)}
                             style={{
                               width: 42, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5,
                               border: "none", background: "transparent", color, padding: "3px 2px",
@@ -1146,13 +1205,17 @@ export default function MRPDashboard() {
   const [orderStatus, setOrderStatus] = useState({});
   const [horizon, setHorizon] = useState(12);
   const [historyWeeks, setHistoryWeeks] = useState(4);
+  const [planOverrides, setPlanOverrides] = useState({});
+  const [receiptOverrides, setReceiptOverrides] = useState({});
   const [selected, setSelected] = useState("BIKE-100");
   const [onlyWithOrders, setOnlyWithOrders] = useState(false);
   const [viewMode, setViewMode] = useState("assembly");
   const [forceOpen, setForceOpen] = useState(null);
+  
   useEffect(() => {
     if (onlyWithOrders) setForceOpen(true);
   }, [onlyWithOrders]);
+  
   const [loadedFlags, setLoadedFlags] = useState({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
   const [hydrated, setHydrated] = useState(false);
   const [hydrating, setHydrating] = useState(true);
@@ -1160,10 +1223,11 @@ export default function MRPDashboard() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [b, inv, dem, po, git, ac, bt, hz, os, hwVal] = await Promise.all([
+      const [b, inv, dem, po, git, ac, bt, hz, os, hwVal, poOverrides, recOverrides] = await Promise.all([
         storageGet("bom"), storageGet("inventory"), storageGet("demand"),
         storageGet("poPending"), storageGet("git"), storageGet("actualConsumption"),
         storageGet("batches"), storageGet("horizon"), storageGet("orderStatus"), storageGet("historyWeeks"),
+        storageGet("planOverrides"), storageGet("receiptOverrides")
       ]);
       if (cancelled) return;
       if (b) { setBom(b); setLoadedFlags((f) => ({ ...f, bom: true })); }
@@ -1176,6 +1240,8 @@ export default function MRPDashboard() {
       if (hz) setHorizon(hz);
       if (hwVal !== null && hwVal !== undefined) setHistoryWeeks(hwVal);
       if (os) setOrderStatus(os);
+      if (poOverrides) setPlanOverrides(poOverrides);
+      if (recOverrides) setReceiptOverrides(recOverrides);
       setHydrating(false);
       setHydrated(true);
     })();
@@ -1192,13 +1258,15 @@ export default function MRPDashboard() {
   useEffect(() => { if (hydrated) storageSet("horizon", horizon); }, [horizon, hydrated]);
   useEffect(() => { if (hydrated) storageSet("historyWeeks", historyWeeks); }, [historyWeeks, hydrated]);
   useEffect(() => { if (hydrated) storageSet("orderStatus", orderStatus); }, [orderStatus, hydrated]);
+  useEffect(() => { if (hydrated) storageSet("planOverrides", planOverrides); }, [planOverrides, hydrated]);
+  useEffect(() => { if (hydrated) storageSet("receiptOverrides", receiptOverrides); }, [receiptOverrides, hydrated]);
 
-  const PERSIST_KEYS = ["bom", "inventory", "demand", "poPending", "git", "actualConsumption", "batches", "horizon", "orderStatus", "planOverrides"];
+  const PERSIST_KEYS = ["bom", "inventory", "demand", "poPending", "git", "actualConsumption", "batches", "horizon", "orderStatus", "planOverrides", "receiptOverrides"];
   const clearSavedData = async () => {
     await storageClearAll(PERSIST_KEYS);
     setBom(SAMPLE_BOM); setInventory(SAMPLE_INVENTORY); setDemand(SAMPLE_DEMAND);
     setScheduledReceiptsPO(SAMPLE_PO_PENDING); setScheduledReceiptsPOOriginal(SAMPLE_PO_PENDING); setScheduledReceiptsGIT(SAMPLE_GIT);
-    setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setBatches(SAMPLE_BATCHES); setHorizon(12); setOrderStatus({}); setPlanOverrides({});
+    setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setBatches(SAMPLE_BATCHES); setHorizon(12); setOrderStatus({}); setPlanOverrides({}); setReceiptOverrides({});
     setLoadedFlags({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
   };
 
@@ -1217,34 +1285,10 @@ export default function MRPDashboard() {
     });
   }, []);
 
-  const { weeks, weekLabels, weekDates, records: rawRecords, order, childrenOf } = useMemo(
-    () => runMRP({ bom, inventory, demand, poPending: scheduledReceiptsPO, git: scheduledReceiptsGIT, actualConsumption, batches, horizon, historyWeeks }),
-    [bom, inventory, demand, scheduledReceiptsPO, scheduledReceiptsGIT, actualConsumption, batches, horizon, historyWeeks]
+  const { weeks, weekLabels, weekDates, records, order, childrenOf, warnings } = useMemo(
+    () => runMRP({ bom, inventory, demand, poPending: scheduledReceiptsPO, git: scheduledReceiptsGIT, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides }),
+    [bom, inventory, demand, scheduledReceiptsPO, scheduledReceiptsGIT, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides]
   );
-
-  const [planOverrides, setPlanOverrides] = useState({});
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const po = await storageGet("planOverrides");
-      if (!cancelled && po) setPlanOverrides(po);
-    })();
-    return () => { cancelled = true; };
-  }, []);
-  useEffect(() => { if (hydrated) storageSet("planOverrides", planOverrides); }, [planOverrides, hydrated]);
-
-  const records = useMemo(() => {
-    const result = {};
-    Object.entries(rawRecords).forEach(([item, rec]) => {
-      const adjustedRelease = rec.plannedRelease.map((v, i) => {
-        const key = `${item}::${i}`;
-        return planOverrides[key] !== undefined ? planOverrides[key] : v;
-      });
-      result[item] = { ...rec, plannedReleaseOriginal: rec.plannedRelease, plannedRelease: adjustedRelease };
-    });
-    return result;
-  }, [rawRecords, planOverrides]);
 
   const adjustPlan = (item, weekIndex, rawValue) => {
     const key = `${item}::${weekIndex}`;
@@ -1267,12 +1311,33 @@ export default function MRPDashboard() {
     });
   };
 
+  const adjustReceipt = (item, weekIndex, rawValue) => {
+    const key = `${item}::${weekIndex}`;
+    setReceiptOverrides((prev) => {
+      const next = { ...prev };
+      if (rawValue === "" || rawValue === null) { delete next[key]; return next; }
+      const n = Number(rawValue);
+      if (!Number.isFinite(n) || n < 0) return prev;
+      next[key] = n;
+      return next;
+    });
+  };
+  const resetReceiptOverride = (item, weekIndex) => {
+    const key = `${item}::${weekIndex}`;
+    setReceiptOverrides((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
   const adjustPOQty = (item, poNumber, rawValue) => {
     const n = Number(rawValue);
     if (!Number.isFinite(n) || n < 0) return;
     setScheduledReceiptsPO((prev) => prev.map((r) => {
       const matchesItem = r.item === item;
-      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]);
+      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono", "เลขที่po"], ["po", "ref", "doc"]);
       return matchesItem && rPo === poNumber ? { ...r, quantity: n } : r;
     }));
   };
@@ -1280,7 +1345,7 @@ export default function MRPDashboard() {
   const poOriginalMap = useMemo(() => {
     const map = {};
     scheduledReceiptsPOOriginal.forEach((r) => {
-      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]) || "?";
+      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono", "เลขที่po"], ["po", "ref", "doc"]) || "?";
       map[`${r.item}::${rPo}`] = { quantity: toNum(r.quantity), week: r.week };
     });
     return map;
@@ -1295,7 +1360,7 @@ export default function MRPDashboard() {
     if (!String(rawValue).trim()) return;
     setScheduledReceiptsPO((prev) => prev.map((r) => {
       const matchesItem = r.item === item;
-      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]);
+      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono", "เลขที่po"], ["po", "ref", "doc"]);
       return matchesItem && rPo === poNumber ? { ...r, week: rawValue } : r;
     }));
   };
@@ -1304,7 +1369,7 @@ export default function MRPDashboard() {
     if (!orig) return;
     setScheduledReceiptsPO((prev) => prev.map((r) => {
       const matchesItem = r.item === item;
-      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]);
+      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono", "เลขที่po"], ["po", "ref", "doc"]);
       return matchesItem && rPo === poNumber ? { ...r, week: orig.week } : r;
     }));
   };
@@ -1314,10 +1379,24 @@ export default function MRPDashboard() {
     if (orig === undefined) return;
     setScheduledReceiptsPO((prev) => prev.map((r) => {
       const matchesItem = r.item === item;
-      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono"], ["po", "ref", "doc"]);
+      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono", "เลขที่po"], ["po", "ref", "doc"]);
       return matchesItem && rPo === poNumber ? { ...r, quantity: orig } : r;
     }));
   };
+
+  const poPendingHeaderWarning = useMemo(() => {
+    if (!scheduledReceiptsPO.length) return null;
+    const headers = Object.keys(scheduledReceiptsPO[0]);
+    const strictCands = ["ponumber", "ponum", "ponbr", "po", "ponr", "pono", "เลขที่po"];
+    const fallbackSubs = ["po", "ref", "doc"];
+    const exclude = new Set(["item", "week", "quantity", "qty", "status"]);
+    const matched = headers.some((h) => {
+      const norm = h.toLowerCase().replace(/[\s_\-#.()]/g, "");
+      if (exclude.has(norm)) return false;
+      return strictCands.includes(norm) || fallbackSubs.some((s) => norm.includes(s));
+    });
+    return matched ? null : headers;
+  }, [scheduledReceiptsPO]);
 
   const vendorGroups = useMemo(() => {
     const map = {};
@@ -1486,6 +1565,38 @@ export default function MRPDashboard() {
         }}><Download size={12} /> template</button>
       </div>
 
+      {poPendingHeaderWarning && (
+        <div style={{
+          border: `1px solid ${COLORS.amber}`, background: "#F3DDBC", color: "#5C4419",
+          padding: "6px 12px", marginBottom: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
+        }}>
+          Couldn't find a PO number column in your PO Pending file — columns detected: {poPendingHeaderWarning.join(", ")}.
+          Rename one to "po_number" (or anything containing "po") and re-upload.
+        </div>
+      )}
+
+      {/* Data Validation Warnings */}
+      {warnings && (warnings.demandWithoutBOM.length > 0 || warnings.missingInventory.length > 0) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          {warnings.demandWithoutBOM.length > 0 && (
+            <div style={{ background: '#F3DDBC', border: `1px solid ${COLORS.amber}`, padding: '8px 12px', color: '#5C4419', fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <AlertTriangle size={14} color={COLORS.amber} style={{ minWidth: 14 }} />
+              <span>
+                <strong>ตรวจสอบข้อมูล:</strong> พบรายการที่มีแผนผลิต (Demand) แต่ไม่มีโครงสร้าง BOM ในระบบ: <b>{warnings.demandWithoutBOM.join(", ")}</b> <i>(หากเป็นสินค้าซื้อมาขายไป หรืออะไหล่ สามารถข้ามได้)</i>
+              </span>
+            </div>
+          )}
+          {warnings.missingInventory.length > 0 && (
+            <div style={{ background: '#F6D9D3', border: `1px solid ${COLORS.rust}`, padding: '8px 12px', color: '#6A2B1D', fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <CircleAlert size={14} color={COLORS.rust} style={{ minWidth: 14 }} />
+              <span>
+                <strong>ข้อมูล Master ขาดหาย:</strong> พบรายการเหล่านี้อยู่ในโครงสร้าง BOM หรือ Demand แต่ไม่มีรายชื่ออยู่ใน Inventory Master: <b>{warnings.missingInventory.join(", ")}</b>
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* KPIs */}
       <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
         <KPI label="Past due releases" value={kpis.pastDue} tone="rust" icon={CircleAlert} />
@@ -1569,15 +1680,17 @@ export default function MRPDashboard() {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <RecordGrid rec={selectedRec} weeks={weeks} weekLabels={weekLabels} weekDates={weekDates} historyWeeks={historyWeeks}
-            onAdjustPlan={adjustPlan} onResetPlanOverride={resetPlanOverride} onAdjustPOQty={adjustPOQty}
-            poOriginalQtyMap={poOriginalQtyMap} onResetPOQty={resetPOQty}
-            onAdjustPOWeek={adjustPOWeek} onResetPOWeek={resetPOWeek} poOriginalMap={poOriginalMap} />
+            onAdjustPlan={adjustPlan} onResetPlanOverride={resetPlanOverride} 
+            onAdjustReceipt={adjustReceipt} onResetReceiptOverride={resetReceiptOverride}
+            onAdjustPOQty={adjustPOQty} poOriginalQtyMap={poOriginalQtyMap} onResetPOQty={resetPOQty}
+            onAdjustPOWeek={adjustPOWeek} onResetPOWeek={resetPOWeek} poOriginalMap={poOriginalMap} 
+            planOverrides={planOverrides} receiptOverrides={receiptOverrides} />
           <PlannedOrders records={records} weeks={weeks} weekLabels={weekLabels} orderStatus={orderStatus} setOrderStatus={setOrderStatus} />
         </div>
       </div>
 
       <div style={{ marginTop: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft }}>
-        Note: planned orders round up to lot size; PO pending is netted against gross requirements in the week it's due, GIT is treated as arriving in week 1 (no date needed since it's already shipped). Expired on-hand stock is excluded from the plan (treated as 0). Actual consumption is compared against calculated gross requirements in the same week; variance only shows where actual data was entered. "Planned order release" cells and PO pending quantities are directly editable \u2014 type a new number to override the calculated plan (amber outline marks an override; click \u21ba to reset).
+        Note: planned orders round up to lot size; PO pending is netted against gross requirements in the week it's due, GIT is treated as arriving in week 1 (no date needed since it's already shipped). Expired on-hand stock is excluded from the plan (treated as 0). Actual consumption is compared against calculated gross requirements in the same week; variance only shows where actual data was entered. "Planned order receipt", "Planned order release", and PO pending quantities are directly editable \u2014 type a new number to override the calculated plan (amber outline marks an override; click \u21ba to reset).
       </div>
     </div>
   );
