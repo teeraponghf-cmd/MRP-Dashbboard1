@@ -148,6 +148,12 @@ function parseWeekToIndex(weekValue, startMonday) {
 
 // ---------- MRP engine ----------
 function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides }) {
+  if (!Array.isArray(bom) || !Array.isArray(inventory)) {
+    return { weeks: [], weekLabels: [], weekDates: [], weekMondayDates: [], records: {}, order: [], childrenOf: {}, historyWeeks: 0, warnings: {} };
+  }
+
+  const HW = Math.max(0, historyWeeks || 0);
+  
   const HW = Math.max(0, historyWeeks || 0);
   const totalCols = HW + horizon;
   const weeks = Array.from({ length: totalCols }, (_, i) => i + 1);
