@@ -1247,7 +1247,43 @@ export default function MRPDashboard() {
     })();
     return () => { cancelled = true; };
   }, []);
+})();
+      return () => { cancelled = true; };
+    }, []);
 
+    // ---------------------------------------------------------
+    // >>>>> เริ่มวางโค้ดใหม่ตรงนี้ครับ (บรรทัด 1250) <<<<<
+    // ---------------------------------------------------------
+    useEffect(() => {
+      // 1. วาง URL จาก Power Automate ตรงนี้
+      const PA_BASE_URL = "https://defaultb0a451413bd9434690304b8b30ca77.f2.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/22/workflows/98efa377cbb84f8f92a8cecf69d97cf9/triggers/manual/paths/invoke?api-version=1";
+
+      const fetchSingleFile = async () => {
+        try {
+          // 2. ระบุชื่อไฟล์ที่ต้องการดึง
+          const filename = "actual_consumption"; 
+          
+          const response = await fetch(`${PA_BASE_URL}&filename=${filename}`);
+          if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+          
+          const csvText = await response.text();
+
+          Papa.parse(csvText, {
+            header: true,
+            skipEmptyLines: true,
+            complete: (res) => {
+              setActualConsumption(res.data);
+              setLoadedFlags((f) => ({ ...f, actualConsumption: true }));
+            }
+          });
+        } catch (error) {
+          console.error(`Error fetching ${filename}:`, error);
+        }
+      };
+
+      fetchSingleFile();
+
+    }, []);
   useEffect(() => { if (hydrated) storageSet("bom", bom); }, [bom, hydrated]);
   useEffect(() => { if (hydrated) storageSet("inventory", inventory); }, [inventory, hydrated]);
   useEffect(() => { if (hydrated) storageSet("demand", demand); }, [demand, hydrated]);
