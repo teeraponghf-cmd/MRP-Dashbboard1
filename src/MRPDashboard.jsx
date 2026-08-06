@@ -388,7 +388,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     const sr = schedReceiptByItem[item] || new Array(totalCols).fill(0);
     const actualCons = actualByItem[item] || new Array(totalCols).fill(0);
 
-    // --- คำนวณค่าเฉลี่ย % Variance จากอดีต ไว้ล่วงหน้าตั้งแต่ต้นลูป ---
+    // --- ประกาศตัวแปรคำนวณ Variance และค่าเฉลี่ยไว้ที่ต้นลูปอย่างถูกต้อง ---
     let totalPastVarianceRatio = 0;
     let activePastWeeksCount = 0;
 
@@ -526,7 +526,6 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
 
   return { weeks, weekLabels, weekDates, weekMondayDates, records, order, childrenOf, historyWeeks: HW, warnings };
 }
-
 // ---------- Storage adapter ----------
 const STORAGE_PREFIX = "mrp_dashboard:";
 async function storageGet(key) {
