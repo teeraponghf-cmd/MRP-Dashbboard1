@@ -154,7 +154,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
 
   const HW = Math.max(0, historyWeeks || 0);
   
-  const HW = Math.max(0, historyWeeks || 0);
+ 
   const totalCols = HW + horizon;
   const weeks = Array.from({ length: totalCols }, (_, i) => i + 1);
   
