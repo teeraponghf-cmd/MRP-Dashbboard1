@@ -148,7 +148,13 @@ function parseWeekToIndex(weekValue, startMonday) {
 
 // ---------- MRP engine ----------
 function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides }) {
+  if (!Array.isArray(bom) || !Array.isArray(inventory)) {
+    return { weeks: [], weekLabels: [], weekDates: [], weekMondayDates: [], records: {}, order: [], childrenOf: {}, historyWeeks: 0, warnings: {} };
+  }
+
   const HW = Math.max(0, historyWeeks || 0);
+  
+ 
   const totalCols = HW + horizon;
   const weeks = Array.from({ length: totalCols }, (_, i) => i + 1);
   
@@ -395,36 +401,39 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     const plannedReceipt = new Array(totalCols).fill(null);
     const pastDue = new Array(totalCols).fill(false);
 
-    let onHandPrev = effectiveOnHand;
-    for (let fi = 0; fi < horizon; fi++) {
-      const i = HW + fi;
-      let proj = onHandPrev + sr[i] - consumption[i];
-      let ordered = 0;
+   let onHandPrev = effectiveOnHand;
+  for (let fi = 0; fi < horizon; fi++) {
+    const i = HW + fi;
+    
+    // นำ Gross Req ของอนาคตมาคูณปรับด้วย % เฉลี่ยจากอดีต (avgVarianceRatio)
+    const adjustedGrossReq = (gr[i] || 0) * avgVarianceRatio;
+    const adjustedConsumption = adjustedGrossReq * safetyFactor;
 
-      const releaseIdx = i - leadTime;
-      const overrideReceiptKey = `${item}::${i}`;
+    let proj = onHandPrev + sr[i] - adjustedConsumption;
+    let ordered = 0;
 
-      // ถ้ายูสเซอร์กรอก Receipt ทับเข้ามา ให้ยึดค่านั้นเป็นหลักเลย
-      if (receiptOverrides && receiptOverrides[overrideReceiptKey] !== undefined) {
-         ordered = receiptOverrides[overrideReceiptKey];
-      } else {
-         if (proj < safety) {
-           if (releaseIdx < HW && planOverrides && planOverrides[`${item}::${HW}`] !== undefined) {
-               ordered = 0;
-           } else {
-               const need = safety - proj;
-               ordered = Math.ceil(need / lotSize) * lotSize;
-           }
-         }
-      }
+    const releaseIdx = i - leadTime;
+    const overrideReceiptKey = `${item}::${i}`;
 
-      plannedReceipt[i] = ordered;
-      proj += ordered;
-      projOnHand[i] = proj;
-      netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - consumption[i]));
-      onHandPrev = proj;
+    if (receiptOverrides && receiptOverrides[overrideReceiptKey] !== undefined) {
+       ordered = receiptOverrides[overrideReceiptKey];
+    } else {
+       if (proj < safety) {
+          if (releaseIdx < HW && planOverrides && planOverrides[`${item}::${HW}`] !== undefined) {
+             ordered = 0;
+          } else {
+             const need = safety - proj;
+             ordered = Math.ceil(need / lotSize) * lotSize;
+          }
+       }
     }
 
+    plannedReceipt[i] = ordered;
+    proj += ordered;
+    projOnHand[i] = proj;
+    netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - adjustedConsumption));
+    onHandPrev = proj;
+  }
     const calcPlannedRelease = new Array(totalCols).fill(0);
     for (let fi = 0; fi < horizon; fi++) {
       const i = HW + fi;
@@ -459,9 +468,24 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       }
     });
 
+  // --- 1. คำนวณหาค่าเฉลี่ย % Variance จากสัปดาห์ในอดีต (Past Weeks) ---
     const actualCons = actualByItem[item] || new Array(totalCols).fill(0);
-    const pastActualTotal = actualCons.slice(0, HW).reduce((a, b) => a + b, 0);
-    const pastActualAvg = HW > 0 ? pastActualTotal / HW : 0;
+    // ใช้ตัวแปร gr ที่ประกาศไว้แล้วตั้งแต่บรรทัดบนๆ ได้เลย ไม่ต้องประกาศ const ซ้ำครับ
+    
+    let totalPastVarianceRatio = 0;
+    let activePastWeeksCount = 0;
+
+    for (let i = 0; i < HW; i++) {
+      const pastPlan = gr[i]; // ใช้ gr ตัวหลัก
+      const pastAct = actualCons[i];
+      if (pastPlan > 0 || pastAct > 0) {
+        const ratio = pastPlan > 0 ? (pastAct / pastPlan) : 1;
+        totalPastVarianceRatio += ratio;
+        activePastWeeksCount++;
+      }
+    }
+
+    const avgVarianceRatio = activePastWeeksCount > 0 ? (totalPastVarianceRatio / activePastWeeksCount) : 1;
 
     records[item] = {
       item,
@@ -781,7 +805,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
     { label: "Gross requirements (calculated)", data: rec.grossReq, kind: "gr" },
     { label: `Consumption used for planning (\u00d7${rec.safetyFactor})`, data: rec.consumption, kind: "consumption" },
     { label: "Actual consumption (issued)", data: rec.actualConsumption, kind: "actual" },
-    { label: "Variance (actual \u2212 calculated)", data: rec.consumptionVariance, kind: "variance" },
+   { label: "Variance (Qty / %)", data: rec.consumptionVariance, kind: "variance" },
     { label: "PO pending", data: rec.poPending, kind: "po" },
     { label: "Goods in transit (GIT)", data: rec.git, kind: "git" },
     { label: "Projected on hand", data: rec.projOnHand, kind: "poh" },
@@ -791,6 +815,34 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
   ];
 
   const formattedAvg = rec.pastActualAvg.toLocaleString(undefined, { maximumFractionDigits: 1 });
+
+  // --- เริ่มคำนวณ Variance รวมของอดีต ---
+  const pastGrossTotal = rec.grossReq.slice(0, historyWeeks).reduce((a, b) => a + b, 0);
+  const pastVarianceTotal = rec.pastActualTotal - pastGrossTotal;
+  
+  let pastVarPctStr = "";
+  if (pastGrossTotal === 0 && rec.pastActualTotal === 0) {
+    pastVarPctStr = "0%";
+  } else if (pastGrossTotal === 0 && rec.pastActualTotal > 0) {
+    pastVarPctStr = "+\u221E%";
+  } else {
+    const pct = (pastVarianceTotal / pastGrossTotal) * 100;
+    pastVarPctStr = pct > 0 ? `+${pct.toFixed(1)}%` : `${pct.toFixed(1)}%`;
+  }
+  const pastVarQtyStr = pastVarianceTotal > 0 ? `+${Math.round(pastVarianceTotal)}` : `${Math.round(pastVarianceTotal)}`;
+  
+  // กำหนดสีให้ตรงกับในตาราง
+  let pastVarColor = COLORS.inkSoft;
+  if (pastVarianceTotal === 0 && pastGrossTotal === 0 && rec.pastActualTotal === 0) {
+    pastVarColor = COLORS.inkSoft;
+  } else if (Math.abs(pastVarianceTotal) < 0.5) {
+    pastVarColor = COLORS.moss;
+  } else if (pastVarianceTotal > 0) {
+    pastVarColor = COLORS.amber;
+  } else {
+    pastVarColor = COLORS.rust;
+  }
+  // --- จบการคำนวณ ---
 
   return (
     <div style={{ border: `1px solid ${COLORS.ink}`, background: COLORS.card }}>
@@ -804,7 +856,14 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
           ["UNIT", rec.unit],
           ["LEAD TIME (WK)", rec.leadTime],
           ["LOT SIZE / SS", `${rec.lotSize} / ${rec.baseSafety}${rec.safetyFactor !== 1 ? ` \u00d7${rec.safetyFactor} = ${rec.safety}` : ""}`],
-          [`PAST ${historyWeeks}W AVG`, `${formattedAvg} ${rec.unit}/wk (${rec.pastActualTotal.toLocaleString()} total)`],
+          [`PAST ${historyWeeks}W AVG`, (
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <span>{formattedAvg} {rec.unit}/wk ({rec.pastActualTotal.toLocaleString()} total)</span>
+              <span style={{ fontSize: 10, color: pastVarColor, fontWeight: 600 }}>
+                Var: {pastVarQtyStr} ({pastVarPctStr})
+              </span>
+            </div>
+          )],
           ["EXPIRY", rec.batches.length > 0
             ? `${rec.batches.length} batch${rec.batches.length === 1 ? "" : "es"}${rec.expired ? " (ALL EXPIRED)" : rec.expiredQty > 0 ? ` (${rec.expiredQty} exp.)` : ""}`
             : (rec.expiryDate ? (rec.expired ? "EXPIRED" : rec.expiryDate) : "\u2014")],
@@ -1039,8 +1098,32 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                             }}
                           />
                         </div>
-                      ) : (
-                        v === null || v === undefined ? "—" : (r.kind === "variance" ? (v > 0 ? `+${Math.round(v)}` : Math.round(v)) : (v ? Math.round(v) : "—"))
+                ) : (
+                        v === null || v === undefined ? "—" : (r.kind === "variance" ? (
+                          (() => {
+                            const plan = rec.grossReq[i];
+                            const act = rec.actualConsumption[i];
+                            if (plan === 0 && act === 0) return "0";
+                            
+                            // สลับฝั่ง Variance เป็น (Calculated - Actual)
+                            const invertedV = plan - act;
+                            let pctStr = "";
+                            if (plan === 0 && act > 0) {
+                              pctStr = "-\u221E%"; 
+                            } else {
+                              const pct = (invertedV / plan) * 100;
+                              pctStr = pct > 0 ? `+${pct.toFixed(1)}%` : `${pct.toFixed(1)}%`;
+                            }
+                            const qtyStr = invertedV > 0 ? `+${Math.round(invertedV)}` : Math.round(invertedV);
+                            
+                            return (
+                              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", lineHeight: "1.1" }}>
+                                <span>{qtyStr}</span>
+                                <span style={{ fontSize: 9, opacity: 0.8, fontWeight: 500 }}>{pctStr}</span>
+                              </div>
+                            );
+                          })()
+                        ) : (v ? Math.round(v) : "—"))
                       )}
                     </td>
                   );
@@ -1218,57 +1301,54 @@ export default function MRPDashboard() {
   
   const [loadedFlags, setLoadedFlags] = useState({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
   const [hydrated, setHydrated] = useState(false);
-  const [hydrating, setHydrating] = useState(true);
-
+const [hydrating, setHydrating] = useState(true);
+    // ---------------------------------------------------------
+    // >>>>> เริ่มวางโค้ดใหม่ตรงนี้ครับ (บรรทัด 1250) <<<<<
+    // ---------------------------------------------------------
+   // ---------------------------------------------------------
+  // ดึงข้อมูลจาก SharePoint (ดึงทุกไฟล์)
+  // ---------------------------------------------------------
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const [b, inv, dem, po, git, ac, bt, hz, os, hwVal, poOverrides, recOverrides] = await Promise.all([
-        storageGet("bom"), storageGet("inventory"), storageGet("demand"),
-        storageGet("poPending"), storageGet("git"), storageGet("actualConsumption"),
-        storageGet("batches"), storageGet("horizon"), storageGet("orderStatus"), storageGet("historyWeeks"),
-        storageGet("planOverrides"), storageGet("receiptOverrides")
-      ]);
-      if (cancelled) return;
-      if (b) { setBom(b); setLoadedFlags((f) => ({ ...f, bom: true })); }
-      if (inv) { setInventory(inv); setLoadedFlags((f) => ({ ...f, inventory: true })); }
-      if (dem) { setDemand(dem); setLoadedFlags((f) => ({ ...f, demand: true })); }
-      if (po) { setScheduledReceiptsPO(po); setScheduledReceiptsPOOriginal(po); setLoadedFlags((f) => ({ ...f, poPending: true })); }
-      if (git) { setScheduledReceiptsGIT(git); setLoadedFlags((f) => ({ ...f, git: true })); }
-      if (ac) { setActualConsumption(ac); setLoadedFlags((f) => ({ ...f, actualConsumption: true })); }
-      if (bt) { setBatches(bt); setLoadedFlags((f) => ({ ...f, batches: true })); }
-      if (hz) setHorizon(hz);
-      if (hwVal !== null && hwVal !== undefined) setHistoryWeeks(hwVal);
-      if (os) setOrderStatus(os);
-      if (poOverrides) setPlanOverrides(poOverrides);
-      if (recOverrides) setReceiptOverrides(recOverrides);
-      setHydrating(false);
-      setHydrated(true);
-    })();
-    return () => { cancelled = true; };
-  }, []);
+    // 1. วาง URL ของ Power Automate ตรงนี้ (ใช้ URL เดิมที่เทสผ่านเมื่อกี้ได้เลย)
+    const PA_BASE_URL = "https://defaultb0a451413bd9434690304b8b30ca77.f2.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/22/workflows/98efa377cbb84f8f92a8cecf69d97cf9/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=GYjaw1ng23DOassgX6tsKKM2JEA88g_dSH7pun4kOw8";
 
-  useEffect(() => { if (hydrated) storageSet("bom", bom); }, [bom, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("inventory", inventory); }, [inventory, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("demand", demand); }, [demand, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("poPending", scheduledReceiptsPO); }, [scheduledReceiptsPO, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("git", scheduledReceiptsGIT); }, [scheduledReceiptsGIT, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("actualConsumption", actualConsumption); }, [actualConsumption, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("batches", batches); }, [batches, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("horizon", horizon); }, [horizon, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("historyWeeks", historyWeeks); }, [historyWeeks, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("orderStatus", orderStatus); }, [orderStatus, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("planOverrides", planOverrides); }, [planOverrides, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("receiptOverrides", receiptOverrides); }, [receiptOverrides, hydrated]);
+    const fetchAndParse = async (filename, stateSetter, flagKey) => {
+      try {
+        const response = await fetch(`${PA_BASE_URL}&filename=${filename}`);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        
+        const csvText = await response.text();
 
-  const PERSIST_KEYS = ["bom", "inventory", "demand", "poPending", "git", "actualConsumption", "batches", "horizon", "orderStatus", "planOverrides", "receiptOverrides"];
-  const clearSavedData = async () => {
-    await storageClearAll(PERSIST_KEYS);
-    setBom(SAMPLE_BOM); setInventory(SAMPLE_INVENTORY); setDemand(SAMPLE_DEMAND);
-    setScheduledReceiptsPO(SAMPLE_PO_PENDING); setScheduledReceiptsPOOriginal(SAMPLE_PO_PENDING); setScheduledReceiptsGIT(SAMPLE_GIT);
-    setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setBatches(SAMPLE_BATCHES); setHorizon(12); setOrderStatus({}); setPlanOverrides({}); setReceiptOverrides({});
-    setLoadedFlags({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
-  };
+        Papa.parse(csvText, {
+          header: true,
+          skipEmptyLines: true,
+          complete: (res) => {
+            stateSetter(res.data);
+            setLoadedFlags((f) => ({ ...f, [flagKey]: true }));
+          }
+        });
+      } catch (error) {
+        console.error(`Error fetching ${filename}:`, error);
+      }
+    };
+
+    // 2. สั่งเรียกทุกไฟล์พร้อมกัน
+    // *ข้อควรระวัง: คำในเครื่องหมายคำพูด (เช่น "bom", "inventory") 
+    // ต้องสะกดให้ตรงกับชื่อไฟล์บน SharePoint เป๊ะๆ (ตัวพิมพ์เล็ก/ใหญ่มีผล)
+    
+    fetchAndParse("bom", setBom, "bom");
+    fetchAndParse("Onhand", setInventory, "inventory");
+    fetchAndParse("Demand Schedule", setDemand, "demand");
+    fetchAndParse("Actual Consumption", setActualConsumption, "actualConsumption");
+    fetchAndParse("Expired", setBatches, "batches");
+    
+    // สำหรับ PO ต้องโหลด 2 ที่ตามโค้ดเดิมของคุณครับ
+    fetchAndParse("Pending", setScheduledReceiptsPOOriginal, "poPending"); 
+    fetchAndParse("Pending", setScheduledReceiptsPO, "poPending");
+    
+    fetchAndParse("GIT", setScheduledReceiptsGIT, "git");
+
+  }, []); 
 
   const handleFile = useCallback((key, setter) => (file) => {
     parseCSV(file, (rows) => {
