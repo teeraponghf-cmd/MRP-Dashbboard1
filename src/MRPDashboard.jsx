@@ -395,36 +395,39 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     const plannedReceipt = new Array(totalCols).fill(null);
     const pastDue = new Array(totalCols).fill(false);
 
-    let onHandPrev = effectiveOnHand;
-    for (let fi = 0; fi < horizon; fi++) {
-      const i = HW + fi;
-      let proj = onHandPrev + sr[i] - consumption[i];
-      let ordered = 0;
+   let onHandPrev = effectiveOnHand;
+  for (let fi = 0; fi < horizon; fi++) {
+    const i = HW + fi;
+    
+    // นำ Gross Req ของอนาคตมาคูณปรับด้วย % เฉลี่ยจากอดีต (avgVarianceRatio)
+    const adjustedGrossReq = (gr[i] || 0) * avgVarianceRatio;
+    const adjustedConsumption = adjustedGrossReq * safetyFactor;
 
-      const releaseIdx = i - leadTime;
-      const overrideReceiptKey = `${item}::${i}`;
+    let proj = onHandPrev + sr[i] - adjustedConsumption;
+    let ordered = 0;
 
-      // ถ้ายูสเซอร์กรอก Receipt ทับเข้ามา ให้ยึดค่านั้นเป็นหลักเลย
-      if (receiptOverrides && receiptOverrides[overrideReceiptKey] !== undefined) {
-         ordered = receiptOverrides[overrideReceiptKey];
-      } else {
-         if (proj < safety) {
-           if (releaseIdx < HW && planOverrides && planOverrides[`${item}::${HW}`] !== undefined) {
-               ordered = 0;
-           } else {
-               const need = safety - proj;
-               ordered = Math.ceil(need / lotSize) * lotSize;
-           }
-         }
-      }
+    const releaseIdx = i - leadTime;
+    const overrideReceiptKey = `${item}::${i}`;
 
-      plannedReceipt[i] = ordered;
-      proj += ordered;
-      projOnHand[i] = proj;
-      netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - consumption[i]));
-      onHandPrev = proj;
+    if (receiptOverrides && receiptOverrides[overrideReceiptKey] !== undefined) {
+       ordered = receiptOverrides[overrideReceiptKey];
+    } else {
+       if (proj < safety) {
+          if (releaseIdx < HW && planOverrides && planOverrides[`${item}::${HW}`] !== undefined) {
+             ordered = 0;
+          } else {
+             const need = safety - proj;
+             ordered = Math.ceil(need / lotSize) * lotSize;
+          }
+       }
     }
 
+    plannedReceipt[i] = ordered;
+    proj += ordered;
+    projOnHand[i] = proj;
+    netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - adjustedConsumption));
+    onHandPrev = proj;
+  }
     const calcPlannedRelease = new Array(totalCols).fill(0);
     for (let fi = 0; fi < horizon; fi++) {
       const i = HW + fi;
@@ -459,9 +462,27 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       }
     });
 
+  // --- 1. คำนวณหาค่าเฉลี่ย % Variance จากสัปดาห์ในอดีต (Past Weeks) ---
     const actualCons = actualByItem[item] || new Array(totalCols).fill(0);
-    const pastActualTotal = actualCons.slice(0, HW).reduce((a, b) => a + b, 0);
-    const pastActualAvg = HW > 0 ? pastActualTotal / HW : 0;
+    const gr = grossReq[item] || new Array(totalCols).fill(0);
+    
+    let totalPastVarianceRatio = 0;
+    let activePastWeeksCount = 0;
+
+    for (let i = 0; i < HW; i++) {
+      const pastPlan = gr[i];
+      const pastAct = actualCons[i];
+      // คิดเฉพาะสัปดาห์ที่มีแผน หรือมีการเบิกจริง เพื่อป้องกันการหารด้วยศูนย์
+      if (pastPlan > 0 || pastAct > 0) {
+        // อัตราส่วนจริงเทียบกับแผน (เช่น เบิก 50 จากแผน 19 คิดเป็นสัดส่วน 50 / 19)
+        const ratio = pastPlan > 0 ? (pastAct / pastPlan) : 1;
+        totalPastVarianceRatio += ratio;
+        activePastWeeksCount++;
+      }
+    }
+
+    // ค่าเฉลี่ยสัดส่วนการเบิกจริงในอดีต (ถ้าไม่มีข้อมูลในอดีตเลย ให้ตีเป็น 1 หรือเท่ากับแผนเดิม)
+    const avgVarianceRatio = activePastWeeksCount > 0 ? (totalPastVarianceRatio / activePastWeeksCount) : 1;
 
     records[item] = {
       item,
