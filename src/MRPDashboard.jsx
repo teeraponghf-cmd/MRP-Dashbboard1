@@ -9,7 +9,7 @@ const SAMPLE_BOM = [
   { parent_item: "BIKE-100", component_item: "DRIVETRAIN-KIT", qty_per: 1 },
   { parent_item: "WHEEL-ASM", component_item: "RIM-26", qty_per: 1 },
   { parent_item: "WHEEL-ASM", component_item: "HUB-STD", qty_per: 1 },
-  { parent_item: "WHEEL-ASM", component_item: "SPOKE-STD", qty_per: 32 },
+  { parent_item: "WHEEL-ASM", component_item: "14000133", qty_per: 32 }, // เปลี่ยนเป็นรหัสตัวเลขให้เห็นภาพ
   { parent_item: "DRIVETRAIN-KIT", component_item: "CHAIN-STD", qty_per: 1 },
   { parent_item: "DRIVETRAIN-KIT", component_item: "CRANKSET", qty_per: 1 },
 ];
@@ -21,7 +21,7 @@ const SAMPLE_INVENTORY = [
   { item: "DRIVETRAIN-KIT", description: "Drivetrain kit", unit: "EA", vendor: "GearForge Ltd.", unit_price: 35, on_hand: 25, lead_time_weeks: 2, lot_size: 15, safety_stock: 6, safety_factor: 1, expiry_date: "" },
   { item: "RIM-26", description: "26in alloy rim", unit: "EA", vendor: "Apex Metal Works", unit_price: 9.5, on_hand: 60, lead_time_weeks: 2, lot_size: 50, safety_stock: 20, safety_factor: 1, expiry_date: "" },
   { item: "HUB-STD", description: "Standard hub", unit: "EA", vendor: "SpinCraft Wheels Co.", unit_price: 6.2, on_hand: 45, lead_time_weeks: 2, lot_size: 40, safety_stock: 15, safety_factor: 1, expiry_date: "" },
-  { item: "SPOKE-STD", description: "Steel spoke", unit: "PCS", vendor: "Apex Metal Works", unit_price: 0.15, on_hand: 900, lead_time_weeks: 1, lot_size: 1000, safety_stock: 300, safety_factor: 1, expiry_date: "" },
+  // จงใจลบ 14000133 ออกจาก Inventory เพื่อให้ระบบแจ้งเตือน
   { item: "CHAIN-STD", description: "Standard chain, pre-lubed", unit: "EA", vendor: "GearForge Ltd.", unit_price: 4.8, on_hand: 20, lead_time_weeks: 4, lot_size: 25, safety_stock: 10, safety_factor: 1.5, expiry_date: "" },
   { item: "CRANKSET", description: "Crankset, forged", unit: "EA", vendor: "GearForge Ltd.", unit_price: 12.5, on_hand: 18, lead_time_weeks: 4, lot_size: 20, safety_stock: 8, safety_factor: 1, expiry_date: "" },
 ];
@@ -35,7 +35,7 @@ const SAMPLE_DEMAND = [
   { item: "BIKE-100", week: "26CW36", quantity: 30 },
   { item: "BIKE-100", week: "26CW38", quantity: 18 },
   { item: "BIKE-100", week: "26CW40", quantity: 22 },
-  { item: "SPOKE-STD", week: "26CW33", quantity: 200 },
+  { item: "14000133", week: "26CW33", quantity: 200 },
 ];
 
 const SAMPLE_PO_PENDING = [
@@ -57,14 +57,14 @@ const SAMPLE_ACTUAL_CONSUMPTION = [
   { item: "WHEEL-ASM", week: "26CW27", quantity: 40 },
   { item: "WHEEL-ASM", week: "26CW28", quantity: 50 },
   { item: "WHEEL-ASM", week: "26CW29", quantity: 36 },
-  { item: "SPOKE-STD", week: "26CW27", quantity: 1280 },
-  { item: "SPOKE-STD", week: "26CW28", quantity: 1600 },
+  { item: "14000133", week: "26CW27", quantity: 1280 },
+  { item: "14000133", week: "26CW28", quantity: 1600 },
   { item: "CHAIN-STD", week: "26CW27", quantity: 20 },
 ];
 
 const SAMPLE_BATCHES = [
-  { item: "SPOKE-STD", batch_no: "SPK-B1", quantity: 300, expiry_date: "2026-07-01" },
-  { item: "SPOKE-STD", batch_no: "SPK-B2", quantity: 600, expiry_date: "2026-11-01" },
+  { item: "14000133", batch_no: "SPK-B1", quantity: 300, expiry_date: "2026-07-01" },
+  { item: "14000133", batch_no: "SPK-B2", quantity: 600, expiry_date: "2026-11-01" },
   { item: "CHAIN-STD", batch_no: "CHN-B1", quantity: 8, expiry_date: "2026-07-28" },
   { item: "CHAIN-STD", batch_no: "CHN-B2", quantity: 12, expiry_date: "2026-12-01" },
 ];
@@ -198,7 +198,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "จำนวน"], ["qty", "quant"]);
       if (rawItem) {
         let it = String(rawItem).trim().toUpperCase();
-        if (toNum(rawQty) > 0) demandItemsSet.add(it); // จับตาดูไอเทมที่มี Demand ยอด > 0
+        if (toNum(rawQty) > 0) demandItemsSet.add(it);
         return it;
       }
       return "";
@@ -213,16 +213,17 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     missingInventory: []
   };
 
-  // 1. หาไอเทมที่อยู่ใน Demand แต่ไม่มี BOM (อาจจะเป็น Order วัตถุดิบตรงๆ หรือลืมใส่ BOM FG)
+  // 1. หาไอเทมที่อยู่ใน Demand แต่ไม่มี BOM 
   Array.from(demandItemsSet).forEach(item => {
     if (!childrenOf[item] || childrenOf[item].length === 0) {
       warnings.demandWithoutBOM.push(item);
     }
   });
 
-  // 2. หาไอเทมที่อยู่ในโครงสร้าง MRP แต่หาในไฟล์ Inventory ไม่เจอ
+  // 2. หาไอเทมที่ไม่มีใน Inventory Master (เช็คเฉพาะ Raw Material ที่รหัสเป็น "ตัวเลขล้วน")
   Array.from(allItems).forEach(item => {
-    if (!invByItem[item]) {
+    // /^\d+$/ หมายถึงสตริงจะต้องประกอบด้วยตัวเลข 0-9 เท่านั้น ตั้งแต่ต้นจนจบ
+    if (!invByItem[item] && /^\d+$/.test(item)) {
       warnings.missingInventory.push(item);
     }
   });
