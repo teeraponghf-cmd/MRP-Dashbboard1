@@ -464,24 +464,21 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
 
   // --- 1. คำนวณหาค่าเฉลี่ย % Variance จากสัปดาห์ในอดีต (Past Weeks) ---
     const actualCons = actualByItem[item] || new Array(totalCols).fill(0);
-    const gr = grossReq[item] || new Array(totalCols).fill(0);
+    // ใช้ตัวแปร gr ที่ประกาศไว้แล้วตั้งแต่บรรทัดบนๆ ได้เลย ไม่ต้องประกาศ const ซ้ำครับ
     
     let totalPastVarianceRatio = 0;
     let activePastWeeksCount = 0;
 
     for (let i = 0; i < HW; i++) {
-      const pastPlan = gr[i];
+      const pastPlan = gr[i]; // ใช้ gr ตัวหลัก
       const pastAct = actualCons[i];
-      // คิดเฉพาะสัปดาห์ที่มีแผน หรือมีการเบิกจริง เพื่อป้องกันการหารด้วยศูนย์
       if (pastPlan > 0 || pastAct > 0) {
-        // อัตราส่วนจริงเทียบกับแผน (เช่น เบิก 50 จากแผน 19 คิดเป็นสัดส่วน 50 / 19)
         const ratio = pastPlan > 0 ? (pastAct / pastPlan) : 1;
         totalPastVarianceRatio += ratio;
         activePastWeeksCount++;
       }
     }
 
-    // ค่าเฉลี่ยสัดส่วนการเบิกจริงในอดีต (ถ้าไม่มีข้อมูลในอดีตเลย ให้ตีเป็น 1 หรือเท่ากับแผนเดิม)
     const avgVarianceRatio = activePastWeeksCount > 0 ? (totalPastVarianceRatio / activePastWeeksCount) : 1;
 
     records[item] = {
