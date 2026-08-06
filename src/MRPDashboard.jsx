@@ -147,7 +147,7 @@ function parseWeekToIndex(weekValue, startMonday) {
 }
 
 // ---------- MRP engine ----------
-function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, batches, horizon, historyWeeks, planOverrides }) {
+function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides }) {
   const HW = Math.max(0, historyWeeks || 0);
   const totalCols = HW + horizon;
   const weeks = Array.from({ length: totalCols }, (_, i) => i + 1);
@@ -206,7 +206,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     ...Object.keys(parentsOf),
   ]);
 
-  // --- DATA VALIDATION (ตรวจสอบข้อมูล) ---
+  // --- DATA VALIDATION ---
   const warnings = {
     demandWithoutBOM: [],
     missingInventory: []
@@ -223,7 +223,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       warnings.missingInventory.push(item);
     }
   });
-  // ----------------------------------------
+  // -----------------------
 
   const level = {};
   allItems.forEach((it) => (level[it] = 0));
@@ -402,10 +402,11 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       let ordered = 0;
 
       const releaseIdx = i - leadTime;
-      const overrideKey = `${item}::${releaseIdx}`;
+      const overrideReceiptKey = `${item}::${i}`;
 
-      if (planOverrides && planOverrides[overrideKey] !== undefined) {
-         ordered = planOverrides[overrideKey];
+      // ถ้ายูสเซอร์กรอก Receipt ทับเข้ามา ให้ยึดค่านั้นเป็นหลักเลย
+      if (receiptOverrides && receiptOverrides[overrideReceiptKey] !== undefined) {
+         ordered = receiptOverrides[overrideReceiptKey];
       } else {
          if (proj < safety) {
            if (releaseIdx < HW && planOverrides && planOverrides[`${item}::${HW}`] !== undefined) {
@@ -774,7 +775,7 @@ function VendorGroupTree({ groups, records, selected, onSelect, onlyWithOrders, 
   );
 }
 
-function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustPlan, onResetPlanOverride, onAdjustPOQty, poOriginalQtyMap, onResetPOQty, onAdjustPOWeek, onResetPOWeek, poOriginalMap, planOverrides }) {
+function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustPlan, onResetPlanOverride, onAdjustReceipt, onResetReceiptOverride, onAdjustPOQty, poOriginalQtyMap, onResetPOQty, onAdjustPOWeek, onResetPOWeek, poOriginalMap, planOverrides, receiptOverrides }) {
   if (!rec) return null;
   const rows = [
     { label: "Gross requirements (calculated)", data: rec.grossReq, kind: "gr" },
@@ -991,28 +992,37 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                     }
                   }
 
-                  const isOverridden = r.kind === "prel" && planOverrides && planOverrides[`${rec.item}::${i}`] !== undefined;
+                  const isOverriddenPrel = r.kind === "prel" && planOverrides && planOverrides[`${rec.item}::${i}`] !== undefined;
+                  const isOverriddenPor = r.kind === "por" && receiptOverrides && receiptOverrides[`${rec.item}::${i}`] !== undefined;
+                  const isOverridden = isOverriddenPrel || isOverriddenPor;
+
                   const isPast = i < historyWeeks;
                   const isEditablePrel = r.kind === "prel" && !isPast;
+                  const isEditablePor = r.kind === "por" && !isPast;
+                  const isEditable = isEditablePrel || isEditablePor;
                   
                   let displayVal = "";
-                  if (isEditablePrel) {
-                    // ถ้าถูก Override ไว้ ไม่ว่าจะเป็นเลขอะไร (รวมถึง 0) ให้แสดงเลขนั้น
-                    // ถ้าไม่ได้ Override ให้ดึงค่าปกติมาแสดง ถ้าเป็น 0 ให้เว้นว่างเพื่อโชว์ Placeholder
+                  if (isEditable) {
                     displayVal = isOverridden ? v : (v ? Math.round(v) : "");
                   }
 
+                  const onAdjust = r.kind === "prel" ? onAdjustPlan : onAdjustReceipt;
+                  const onReset = r.kind === "prel" ? onResetPlanOverride : onResetReceiptOverride;
+                  const tooltipMsg = r.kind === "prel" 
+                    ? `LT = ${rec.leadTime} wk \u2192 Arrives: ${i + rec.leadTime < weeks.length ? weekLabels[i + rec.leadTime] : "Out of horizon"}`
+                    : `Receipt in ${weekLabels[i]} \u2192 Pushes On-Hand up`;
+
                   return (
                     <td key={i} style={{
-                      textAlign: "right", padding: r.kind === "prel" ? "3px 4px" : "6px 8px", borderTop: `1px solid ${COLORS.paperLine}`,
+                      textAlign: "right", padding: isEditable ? "3px 4px" : "6px 8px", borderTop: `1px solid ${COLORS.paperLine}`,
                       borderLeft: i === historyWeeks ? `2px solid ${COLORS.steel}` : `1px solid ${COLORS.paperLine}`,
                       color, background: isPast && bg === "transparent" ? "#F1F1EA" : bg,
                       outline: isOverridden ? `2px solid ${COLORS.amber}` : "none", outlineOffset: "-2px",
                     }}>
-                      {isEditablePrel ? (
+                      {isEditable ? (
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2 }}>
                           {isOverridden && (
-                            <button onClick={() => onResetPlanOverride(rec.item, i)} title="reset to calculated value" style={{
+                            <button onClick={() => onReset(rec.item, i)} title="reset to calculated value" style={{
                               border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
                               fontSize: 9, padding: 0, lineHeight: 1,
                             }}>&#8635;</button>
@@ -1021,8 +1031,8 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                             type="number" min={0}
                             value={displayVal}
                             placeholder="—"
-                            title={`LT = ${rec.leadTime} wk \u2192 Arrives: ${i + rec.leadTime < weeks.length ? weekLabels[i + rec.leadTime] : "Out of horizon"}`}
-                            onChange={(e) => onAdjustPlan(rec.item, i, e.target.value)}
+                            title={tooltipMsg}
+                            onChange={(e) => onAdjust(rec.item, i, e.target.value)}
                             style={{
                               width: 42, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5,
                               border: "none", background: "transparent", color, padding: "3px 2px",
@@ -1196,6 +1206,7 @@ export default function MRPDashboard() {
   const [horizon, setHorizon] = useState(12);
   const [historyWeeks, setHistoryWeeks] = useState(4);
   const [planOverrides, setPlanOverrides] = useState({});
+  const [receiptOverrides, setReceiptOverrides] = useState({});
   const [selected, setSelected] = useState("BIKE-100");
   const [onlyWithOrders, setOnlyWithOrders] = useState(false);
   const [viewMode, setViewMode] = useState("assembly");
@@ -1212,11 +1223,11 @@ export default function MRPDashboard() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [b, inv, dem, po, git, ac, bt, hz, os, hwVal, poOverrides] = await Promise.all([
+      const [b, inv, dem, po, git, ac, bt, hz, os, hwVal, poOverrides, recOverrides] = await Promise.all([
         storageGet("bom"), storageGet("inventory"), storageGet("demand"),
         storageGet("poPending"), storageGet("git"), storageGet("actualConsumption"),
         storageGet("batches"), storageGet("horizon"), storageGet("orderStatus"), storageGet("historyWeeks"),
-        storageGet("planOverrides")
+        storageGet("planOverrides"), storageGet("receiptOverrides")
       ]);
       if (cancelled) return;
       if (b) { setBom(b); setLoadedFlags((f) => ({ ...f, bom: true })); }
@@ -1230,6 +1241,7 @@ export default function MRPDashboard() {
       if (hwVal !== null && hwVal !== undefined) setHistoryWeeks(hwVal);
       if (os) setOrderStatus(os);
       if (poOverrides) setPlanOverrides(poOverrides);
+      if (recOverrides) setReceiptOverrides(recOverrides);
       setHydrating(false);
       setHydrated(true);
     })();
@@ -1247,13 +1259,14 @@ export default function MRPDashboard() {
   useEffect(() => { if (hydrated) storageSet("historyWeeks", historyWeeks); }, [historyWeeks, hydrated]);
   useEffect(() => { if (hydrated) storageSet("orderStatus", orderStatus); }, [orderStatus, hydrated]);
   useEffect(() => { if (hydrated) storageSet("planOverrides", planOverrides); }, [planOverrides, hydrated]);
+  useEffect(() => { if (hydrated) storageSet("receiptOverrides", receiptOverrides); }, [receiptOverrides, hydrated]);
 
-  const PERSIST_KEYS = ["bom", "inventory", "demand", "poPending", "git", "actualConsumption", "batches", "horizon", "orderStatus", "planOverrides"];
+  const PERSIST_KEYS = ["bom", "inventory", "demand", "poPending", "git", "actualConsumption", "batches", "horizon", "orderStatus", "planOverrides", "receiptOverrides"];
   const clearSavedData = async () => {
     await storageClearAll(PERSIST_KEYS);
     setBom(SAMPLE_BOM); setInventory(SAMPLE_INVENTORY); setDemand(SAMPLE_DEMAND);
     setScheduledReceiptsPO(SAMPLE_PO_PENDING); setScheduledReceiptsPOOriginal(SAMPLE_PO_PENDING); setScheduledReceiptsGIT(SAMPLE_GIT);
-    setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setBatches(SAMPLE_BATCHES); setHorizon(12); setOrderStatus({}); setPlanOverrides({});
+    setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setBatches(SAMPLE_BATCHES); setHorizon(12); setOrderStatus({}); setPlanOverrides({}); setReceiptOverrides({});
     setLoadedFlags({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
   };
 
@@ -1273,8 +1286,8 @@ export default function MRPDashboard() {
   }, []);
 
   const { weeks, weekLabels, weekDates, records, order, childrenOf, warnings } = useMemo(
-    () => runMRP({ bom, inventory, demand, poPending: scheduledReceiptsPO, git: scheduledReceiptsGIT, actualConsumption, batches, horizon, historyWeeks, planOverrides }),
-    [bom, inventory, demand, scheduledReceiptsPO, scheduledReceiptsGIT, actualConsumption, batches, horizon, historyWeeks, planOverrides]
+    () => runMRP({ bom, inventory, demand, poPending: scheduledReceiptsPO, git: scheduledReceiptsGIT, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides }),
+    [bom, inventory, demand, scheduledReceiptsPO, scheduledReceiptsGIT, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides]
   );
 
   const adjustPlan = (item, weekIndex, rawValue) => {
@@ -1291,6 +1304,27 @@ export default function MRPDashboard() {
   const resetPlanOverride = (item, weekIndex) => {
     const key = `${item}::${weekIndex}`;
     setPlanOverrides((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const adjustReceipt = (item, weekIndex, rawValue) => {
+    const key = `${item}::${weekIndex}`;
+    setReceiptOverrides((prev) => {
+      const next = { ...prev };
+      if (rawValue === "" || rawValue === null) { delete next[key]; return next; }
+      const n = Number(rawValue);
+      if (!Number.isFinite(n) || n < 0) return prev;
+      next[key] = n;
+      return next;
+    });
+  };
+  const resetReceiptOverride = (item, weekIndex) => {
+    const key = `${item}::${weekIndex}`;
+    setReceiptOverrides((prev) => {
       if (!(key in prev)) return prev;
       const next = { ...prev };
       delete next[key];
@@ -1646,15 +1680,17 @@ export default function MRPDashboard() {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <RecordGrid rec={selectedRec} weeks={weeks} weekLabels={weekLabels} weekDates={weekDates} historyWeeks={historyWeeks}
-            onAdjustPlan={adjustPlan} onResetPlanOverride={resetPlanOverride} onAdjustPOQty={adjustPOQty}
-            poOriginalQtyMap={poOriginalQtyMap} onResetPOQty={resetPOQty}
-            onAdjustPOWeek={adjustPOWeek} onResetPOWeek={resetPOWeek} poOriginalMap={poOriginalMap} planOverrides={planOverrides} />
+            onAdjustPlan={adjustPlan} onResetPlanOverride={resetPlanOverride} 
+            onAdjustReceipt={adjustReceipt} onResetReceiptOverride={resetReceiptOverride}
+            onAdjustPOQty={adjustPOQty} poOriginalQtyMap={poOriginalQtyMap} onResetPOQty={resetPOQty}
+            onAdjustPOWeek={adjustPOWeek} onResetPOWeek={resetPOWeek} poOriginalMap={poOriginalMap} 
+            planOverrides={planOverrides} receiptOverrides={receiptOverrides} />
           <PlannedOrders records={records} weeks={weeks} weekLabels={weekLabels} orderStatus={orderStatus} setOrderStatus={setOrderStatus} />
         </div>
       </div>
 
       <div style={{ marginTop: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft }}>
-        Note: planned orders round up to lot size; PO pending is netted against gross requirements in the week it's due, GIT is treated as arriving in week 1 (no date needed since it's already shipped). Expired on-hand stock is excluded from the plan (treated as 0). Actual consumption is compared against calculated gross requirements in the same week; variance only shows where actual data was entered. "Planned order release" cells and PO pending quantities are directly editable \u2014 type a new number to override the calculated plan (amber outline marks an override; click \u21ba to reset).
+        Note: planned orders round up to lot size; PO pending is netted against gross requirements in the week it's due, GIT is treated as arriving in week 1 (no date needed since it's already shipped). Expired on-hand stock is excluded from the plan (treated as 0). Actual consumption is compared against calculated gross requirements in the same week; variance only shows where actual data was entered. "Planned order receipt", "Planned order release", and PO pending quantities are directly editable \u2014 type a new number to override the calculated plan (amber outline marks an override; click \u21ba to reset).
       </div>
     </div>
   );
