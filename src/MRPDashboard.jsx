@@ -146,7 +146,7 @@ function parseWeekToIndex(weekValue, startMonday) {
   return Number.isFinite(n) ? n - 1 : 0; 
 }
 
-// ---------- MRP engine ----------
+// ---------- MRP engine (FIXED) ----------
 function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides }) {
   if (!Array.isArray(bom) || !Array.isArray(inventory)) {
     return { weeks: [], weekLabels: [], weekDates: [], weekMondayDates: [], records: {}, order: [], childrenOf: {}, historyWeeks: 0, warnings: {} };
@@ -155,7 +155,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
   const HW = Math.max(0, historyWeeks || 0);
   const totalCols = HW + horizon;
   const weeks = Array.from({ length: totalCols }, (_, i) => i + 1);
-  
+
   const invByItem = {};
   inventory.forEach((r) => {
     let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item", "part", "รหัส"]);
@@ -176,8 +176,8 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     };
   });
 
-  const childrenOf = {}; 
-  const parentsOf = {}; 
+  const childrenOf = {};
+  const parentsOf = {};
   bom.forEach((r) => {
     let p = extract(r, "parent_item", ["parentitem", "parent", "assembly", "fg", "แม่"], ["parent"]);
     let c = extract(r, "component_item", ["componentitem", "component", "child", "part", "rm", "ลูก"], ["comp", "child"]);
@@ -252,7 +252,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     return `${dd}/${mm}`;
   });
   const weekMondayDates = weeks.map((_, i) => new Date(startMonday.getTime() + (i - HW) * 7 * 86400000).toISOString().slice(0, 10));
-  
+
   (demand || []).forEach((r) => {
     let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item"]);
     let rawWeek = extract(r, "week", ["week", "wk", "cw", "สัปดาห์"], ["week"]);
@@ -273,7 +273,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     poPendingByItem[it] = new Array(totalCols).fill(0);
     gitByItem[it] = new Array(totalCols).fill(0);
   });
-  
+
   const poDetailsByItem = {};
   (poPending || []).forEach((r) => {
     let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item"]);
@@ -297,7 +297,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     }
   });
   Object.values(poDetailsByItem).forEach((list) => list.sort((a, b) => a.weekIdx - b.weekIdx));
-  
+
   (git || []).forEach((r) => {
     let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item"]);
     let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "จำนวน"], ["qty", "quant"]);
@@ -353,6 +353,8 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     const lotSize = Math.max(1, toNum(inv.lot_size, 1));
     const baseSafety = Math.max(0, toNum(inv.safety_stock, 0));
     const safetyFactor = toNum(inv.safety_factor, 1) || 1;
+    // FIX #2: safetyFactor scales the SAFETY STOCK TARGET only.
+    // It must NOT also scale demand/consumption (that double-counts the buffer).
     const safety = baseSafety * safetyFactor;
 
     const itemBatches = batchesByItem[item] || [];
@@ -394,24 +396,42 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       totalPastPlan += gr[i] || 0;
       totalPastActual += actualCons[i] || 0;
     }
-    const consumptionFactor = totalPastPlan > 0 ? (totalPastActual / totalPastPlan) : 1;
+    // FIX #1: if there is no actual-consumption data at all for this item
+    // (totalPastActual === 0, e.g. the actualConsumption sheet is empty or
+    // doesn't cover this item), we must NOT infer a 0-ratio and let it get
+    // clamped to 0.5 below. Missing data means "no adjustment", i.e. factor = 1.
+    const consumptionFactor =
+      (totalPastPlan > 0 && totalPastActual > 0)
+        ? (totalPastActual / totalPastPlan)
+        : 1;
 
     const pastActualTotal = actualCons.slice(0, HW).reduce((a, b) => a + b, 0);
     const pastActualAvg = HW > 0 ? pastActualTotal / HW : 0;
 
-    const consumption = gr.map((v) => v * safetyFactor);
+    // NOTE: this "consumption" field is for display only and intentionally
+    // does NOT include safetyFactor or adjustedFactor anymore (see FIX #2/#3
+    // below) — it should reflect raw gross requirement so it ties out with
+    // what's shown to the user. Safety buffer is applied separately via
+    // `safety`, and the aggregate adjustment is applied via adjustedConsumption
+    // (now also stored per-row so the numbers are traceable).
+    const consumption = gr.map((v) => v);
     const projOnHand = new Array(totalCols).fill(null);
     const netReq = new Array(totalCols).fill(null);
     const plannedReceipt = new Array(totalCols).fill(null);
     const pastDue = new Array(totalCols).fill(false);
+    const adjustedConsumptionArr = new Array(totalCols).fill(null);
 
     let onHandPrev = effectiveOnHand;
     for (let fi = 0; fi < horizon; fi++) {
       const i = HW + fi;
-      
-      // ปรับความต้องการในอนาคตด้วยสัดส่วนรวมที่เสถียร (จำกัดช่วงไม่ให้คลาดเคลื่อนเกินจริง เช่น 0.5x ถึง 2.0x ถ้าต้องการ หรือใช้ตามจริง)
+
+      // ปรับความต้องการในอนาคตด้วยสัดส่วนรวมที่เสถียร (จำกัดช่วง 0.5x-2.0x)
       const adjustedFactor = Math.max(0.5, Math.min(2.0, consumptionFactor));
-      const adjustedConsumption = (gr[i] || 0) * safetyFactor * adjustedFactor;
+      // FIX #2: removed the extra `* safetyFactor` here — safetyFactor already
+      // raises the `safety` target above, so multiplying demand by it too was
+      // double-applying the buffer.
+      const adjustedConsumption = (gr[i] || 0) * adjustedFactor;
+      adjustedConsumptionArr[i] = adjustedConsumption;
 
       let proj = onHandPrev + sr[i] - adjustedConsumption;
       let ordered = 0;
@@ -485,6 +505,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       safety,
       baseSafety,
       safetyFactor,
+      consumptionFactor,
       onHand: rawOnHand,
       usableOnHand: effectiveOnHand,
       expiredQty: Math.max(0, rawOnHand - effectiveOnHand),
@@ -498,10 +519,14 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       weeksToExpiry,
       grossReq: gr,
       consumption,
+      adjustedConsumption: adjustedConsumptionArr,
       scheduledReceipts: sr,
-      poPending: poPendingByItem[item] || new Array(horizon).fill(0),
+      // FIX #4: fallback arrays now match totalCols so indices line up with
+      // every other per-item array (previously defaulted to length `horizon`,
+      // which is HW columns short and would misalign with weekLabels/weekDates).
+      poPending: poPendingByItem[item] || new Array(totalCols).fill(0),
       poPendingDetails: poDetailsByItem[item] || [],
-      git: gitByItem[item] || new Array(horizon).fill(0),
+      git: gitByItem[item] || new Array(totalCols).fill(0),
       actualConsumption: actualCons,
       pastActualTotal,
       pastActualAvg,
