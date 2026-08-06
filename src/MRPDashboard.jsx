@@ -1282,10 +1282,10 @@ export default function MRPDashboard() {
     // ต้องสะกดให้ตรงกับชื่อไฟล์บน SharePoint เป๊ะๆ (ตัวพิมพ์เล็ก/ใหญ่มีผล)
     
     fetchAndParse("bom", setBom, "bom");
-    fetchAndParse("inventory", setInventory, "inventory");
-    fetchAndParse("demand", setDemand, "demand");
-    fetchAndParse("actual_consumption", setActualConsumption, "actualConsumption");
-    fetchAndParse("batches", setBatches, "batches");
+    fetchAndParse("Onhand", setInventory, "inventory");
+    fetchAndParse("Demand Schedule", setDemand, "demand");
+    fetchAndParse("Actual Consumption", setActualConsumption, "actualConsumption");
+    fetchAndParse("Expired", setBatches, "batches");
     
     // สำหรับ PO ต้องโหลด 2 ที่ตามโค้ดเดิมของคุณครับ
     fetchAndParse("po_pending", setScheduledReceiptsPOOriginal, "poPending"); 
