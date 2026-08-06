@@ -1074,21 +1074,23 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                             }}
                           />
                         </div>
-                     ) : (
+                ) : (
                         v === null || v === undefined ? "—" : (r.kind === "variance" ? (
                           (() => {
                             const plan = rec.grossReq[i];
                             const act = rec.actualConsumption[i];
                             if (plan === 0 && act === 0) return "0";
                             
+                            // สลับฝั่ง Variance เป็น (Calculated - Actual)
+                            const invertedV = plan - act;
                             let pctStr = "";
                             if (plan === 0 && act > 0) {
-                              pctStr = "+\u221E%"; // กรณีไม่มีแผน แต่มีการเบิกจริง (Infinity)
+                              pctStr = "-\u221E%"; 
                             } else {
-                              const pct = (v / plan) * 100;
+                              const pct = (invertedV / plan) * 100;
                               pctStr = pct > 0 ? `+${pct.toFixed(1)}%` : `${pct.toFixed(1)}%`;
                             }
-                            const qtyStr = v > 0 ? `+${Math.round(v)}` : Math.round(v);
+                            const qtyStr = invertedV > 0 ? `+${Math.round(invertedV)}` : Math.round(invertedV);
                             
                             return (
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", lineHeight: "1.1" }}>
