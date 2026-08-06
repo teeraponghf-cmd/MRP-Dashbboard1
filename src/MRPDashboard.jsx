@@ -792,6 +792,34 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
 
   const formattedAvg = rec.pastActualAvg.toLocaleString(undefined, { maximumFractionDigits: 1 });
 
+  // --- เริ่มคำนวณ Variance รวมของอดีต ---
+  const pastGrossTotal = rec.grossReq.slice(0, historyWeeks).reduce((a, b) => a + b, 0);
+  const pastVarianceTotal = rec.pastActualTotal - pastGrossTotal;
+  
+  let pastVarPctStr = "";
+  if (pastGrossTotal === 0 && rec.pastActualTotal === 0) {
+    pastVarPctStr = "0%";
+  } else if (pastGrossTotal === 0 && rec.pastActualTotal > 0) {
+    pastVarPctStr = "+\u221E%";
+  } else {
+    const pct = (pastVarianceTotal / pastGrossTotal) * 100;
+    pastVarPctStr = pct > 0 ? `+${pct.toFixed(1)}%` : `${pct.toFixed(1)}%`;
+  }
+  const pastVarQtyStr = pastVarianceTotal > 0 ? `+${Math.round(pastVarianceTotal)}` : `${Math.round(pastVarianceTotal)}`;
+  
+  // กำหนดสีให้ตรงกับในตาราง
+  let pastVarColor = COLORS.inkSoft;
+  if (pastVarianceTotal === 0 && pastGrossTotal === 0 && rec.pastActualTotal === 0) {
+    pastVarColor = COLORS.inkSoft;
+  } else if (Math.abs(pastVarianceTotal) < 0.5) {
+    pastVarColor = COLORS.moss;
+  } else if (pastVarianceTotal > 0) {
+    pastVarColor = COLORS.amber;
+  } else {
+    pastVarColor = COLORS.rust;
+  }
+  // --- จบการคำนวณ ---
+
   return (
     <div style={{ border: `1px solid ${COLORS.ink}`, background: COLORS.card }}>
       {/* title block */}
@@ -804,7 +832,14 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
           ["UNIT", rec.unit],
           ["LEAD TIME (WK)", rec.leadTime],
           ["LOT SIZE / SS", `${rec.lotSize} / ${rec.baseSafety}${rec.safetyFactor !== 1 ? ` \u00d7${rec.safetyFactor} = ${rec.safety}` : ""}`],
-          [`PAST ${historyWeeks}W AVG`, `${formattedAvg} ${rec.unit}/wk (${rec.pastActualTotal.toLocaleString()} total)`],
+          [`PAST ${historyWeeks}W AVG`, (
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <span>{formattedAvg} {rec.unit}/wk ({rec.pastActualTotal.toLocaleString()} total)</span>
+              <span style={{ fontSize: 10, color: pastVarColor, fontWeight: 600 }}>
+                Var: {pastVarQtyStr} ({pastVarPctStr})
+              </span>
+            </div>
+          )],
           ["EXPIRY", rec.batches.length > 0
             ? `${rec.batches.length} batch${rec.batches.length === 1 ? "" : "es"}${rec.expired ? " (ALL EXPIRED)" : rec.expiredQty > 0 ? ` (${rec.expiredQty} exp.)` : ""}`
             : (rec.expiryDate ? (rec.expired ? "EXPIRED" : rec.expiryDate) : "\u2014")],
