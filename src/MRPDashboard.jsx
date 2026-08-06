@@ -147,6 +147,7 @@ function parseWeekToIndex(weekValue, startMonday) {
 }
 
 // ---------- MRP engine (FIXED) ----------
+// ---------- MRP engine (FIXED) ----------
 function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides }) {
   if (!Array.isArray(bom) || !Array.isArray(inventory)) {
     return { weeks: [], weekLabels: [], weekDates: [], weekMondayDates: [], records: {}, order: [], childrenOf: {}, historyWeeks: 0, warnings: {} };
@@ -520,6 +521,16 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       grossReq: gr,
       consumption,
       adjustedConsumption: adjustedConsumptionArr,
+      // Per-row comparison helpers: null in history weeks (adjustedConsumption
+      // is only computed for future/forecast weeks), numeric only where both
+      // sides exist so the UI can show "-" instead of 0 when there's nothing
+      // to compare yet.
+      consumptionDiff: consumption.map((v, i) =>
+        adjustedConsumptionArr[i] === null ? null : (adjustedConsumptionArr[i] - v)
+      ),
+      consumptionDiffPct: consumption.map((v, i) =>
+        adjustedConsumptionArr[i] === null || v === 0 ? null : ((adjustedConsumptionArr[i] - v) / v) * 100
+      ),
       scheduledReceipts: sr,
       // FIX #4: fallback arrays now match totalCols so indices line up with
       // every other per-item array (previously defaulted to length `horizon`,
