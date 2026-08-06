@@ -1220,33 +1220,7 @@ export default function MRPDashboard() {
   const [hydrated, setHydrated] = useState(false);
   const [hydrating, setHydrating] = useState(true);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const [b, inv, dem, po, git, ac, bt, hz, os, hwVal, poOverrides, recOverrides] = await Promise.all([
-        storageGet("bom"), storageGet("inventory"), storageGet("demand"),
-        storageGet("poPending"), storageGet("git"), storageGet("actualConsumption"),
-        storageGet("batches"), storageGet("horizon"), storageGet("orderStatus"), storageGet("historyWeeks"),
-        storageGet("planOverrides"), storageGet("receiptOverrides")
-      ]);
-      if (cancelled) return;
-      if (b) { setBom(b); setLoadedFlags((f) => ({ ...f, bom: true })); }
-      if (inv) { setInventory(inv); setLoadedFlags((f) => ({ ...f, inventory: true })); }
-      if (dem) { setDemand(dem); setLoadedFlags((f) => ({ ...f, demand: true })); }
-      if (po) { setScheduledReceiptsPO(po); setScheduledReceiptsPOOriginal(po); setLoadedFlags((f) => ({ ...f, poPending: true })); }
-      if (git) { setScheduledReceiptsGIT(git); setLoadedFlags((f) => ({ ...f, git: true })); }
-      if (ac) { setActualConsumption(ac); setLoadedFlags((f) => ({ ...f, actualConsumption: true })); }
-      if (bt) { setBatches(bt); setLoadedFlags((f) => ({ ...f, batches: true })); }
-      if (hz) setHorizon(hz);
-      if (hwVal !== null && hwVal !== undefined) setHistoryWeeks(hwVal);
-      if (os) setOrderStatus(os);
-      if (poOverrides) setPlanOverrides(poOverrides);
-      if (recOverrides) setReceiptOverrides(recOverrides);
-      setHydrating(false);
-      setHydrated(true);
-    })();
-    return () => { cancelled = true; };
-  }, []);
+
     // ---------------------------------------------------------
     // >>>>> เริ่มวางโค้ดใหม่ตรงนี้ครับ (บรรทัด 1250) <<<<<
     // ---------------------------------------------------------
@@ -1294,28 +1268,6 @@ export default function MRPDashboard() {
     fetchAndParse("GIT", setScheduledReceiptsGIT, "git");
 
   }, []); 
-  // ---------------------------------------------------------
-  useEffect(() => { if (hydrated) storageSet("bom", bom); }, [bom, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("inventory", inventory); }, [inventory, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("demand", demand); }, [demand, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("poPending", scheduledReceiptsPO); }, [scheduledReceiptsPO, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("git", scheduledReceiptsGIT); }, [scheduledReceiptsGIT, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("actualConsumption", actualConsumption); }, [actualConsumption, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("batches", batches); }, [batches, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("horizon", horizon); }, [horizon, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("historyWeeks", historyWeeks); }, [historyWeeks, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("orderStatus", orderStatus); }, [orderStatus, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("planOverrides", planOverrides); }, [planOverrides, hydrated]);
-  useEffect(() => { if (hydrated) storageSet("receiptOverrides", receiptOverrides); }, [receiptOverrides, hydrated]);
-
-  const PERSIST_KEYS = ["bom", "inventory", "demand", "poPending", "git", "actualConsumption", "batches", "horizon", "orderStatus", "planOverrides", "receiptOverrides"];
-  const clearSavedData = async () => {
-    await storageClearAll(PERSIST_KEYS);
-    setBom(SAMPLE_BOM); setInventory(SAMPLE_INVENTORY); setDemand(SAMPLE_DEMAND);
-    setScheduledReceiptsPO(SAMPLE_PO_PENDING); setScheduledReceiptsPOOriginal(SAMPLE_PO_PENDING); setScheduledReceiptsGIT(SAMPLE_GIT);
-    setActualConsumption(SAMPLE_ACTUAL_CONSUMPTION); setBatches(SAMPLE_BATCHES); setHorizon(12); setOrderStatus({}); setPlanOverrides({}); setReceiptOverrides({});
-    setLoadedFlags({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
-  };
 
   const handleFile = useCallback((key, setter) => (file) => {
     parseCSV(file, (rows) => {
