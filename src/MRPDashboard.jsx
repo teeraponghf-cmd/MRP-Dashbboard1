@@ -147,14 +147,13 @@ function parseWeekToIndex(weekValue, startMonday) {
 }
 
 // ---------- MRP engine ----------
+// ---------- MRP engine ----------
 function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides }) {
   if (!Array.isArray(bom) || !Array.isArray(inventory)) {
     return { weeks: [], weekLabels: [], weekDates: [], weekMondayDates: [], records: {}, order: [], childrenOf: {}, historyWeeks: 0, warnings: {} };
   }
 
   const HW = Math.max(0, historyWeeks || 0);
-  
- 
   const totalCols = HW + horizon;
   const weeks = Array.from({ length: totalCols }, (_, i) => i + 1);
   
@@ -195,7 +194,6 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
   });
 
   const demandItemsSet = new Set();
-  
   const allItems = new Set([
     ...Object.keys(invByItem),
     ...(demand || []).map(r => {
@@ -212,24 +210,17 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     ...Object.keys(parentsOf),
   ]);
 
-  // --- DATA VALIDATION ---
-  const warnings = {
-    demandWithoutBOM: [],
-    missingInventory: []
-  };
-
+  const warnings = { demandWithoutBOM: [], missingInventory: [] };
   Array.from(demandItemsSet).forEach(item => {
     if (!childrenOf[item] || childrenOf[item].length === 0) {
       warnings.demandWithoutBOM.push(item);
     }
   });
-
   Array.from(allItems).forEach(item => {
     if (!invByItem[item] && /^\d+$/.test(item)) {
       warnings.missingInventory.push(item);
     }
   });
-  // -----------------------
 
   const level = {};
   allItems.forEach((it) => (level[it] = 0));
@@ -395,45 +386,65 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
 
     const gr = grossReq[item] || new Array(totalCols).fill(0);
     const sr = schedReceiptByItem[item] || new Array(totalCols).fill(0);
+    const actualCons = actualByItem[item] || new Array(totalCols).fill(0);
+
+    // --- คำนวณค่าเฉลี่ย % Variance จากอดีต ไว้ล่วงหน้าตั้งแต่ต้นลูป ---
+    let totalPastVarianceRatio = 0;
+    let activePastWeeksCount = 0;
+
+    for (let i = 0; i < HW; i++) {
+      const pastPlan = gr[i];
+      const pastAct = actualCons[i];
+      if (pastPlan > 0 || pastAct > 0) {
+        const ratio = pastPlan > 0 ? (pastAct / pastPlan) : 1;
+        totalPastVarianceRatio += ratio;
+        activePastWeeksCount++;
+      }
+    }
+    const avgVarianceRatio = activePastWeeksCount > 0 ? (totalPastVarianceRatio / activePastWeeksCount) : 1;
+
+    const pastActualTotal = actualCons.slice(0, HW).reduce((a, b) => a + b, 0);
+    const pastActualAvg = HW > 0 ? pastActualTotal / HW : 0;
+
     const consumption = gr.map((v) => v * safetyFactor);
     const projOnHand = new Array(totalCols).fill(null);
     const netReq = new Array(totalCols).fill(null);
     const plannedReceipt = new Array(totalCols).fill(null);
     const pastDue = new Array(totalCols).fill(false);
 
-   let onHandPrev = effectiveOnHand;
-  for (let fi = 0; fi < horizon; fi++) {
-    const i = HW + fi;
-    
-    // นำ Gross Req ของอนาคตมาคูณปรับด้วย % เฉลี่ยจากอดีต (avgVarianceRatio)
-    const adjustedGrossReq = (gr[i] || 0) * avgVarianceRatio;
-    const adjustedConsumption = adjustedGrossReq * safetyFactor;
+    let onHandPrev = effectiveOnHand;
+    for (let fi = 0; fi < horizon; fi++) {
+      const i = HW + fi;
+      
+      const adjustedGrossReq = (gr[i] || 0) * avgVarianceRatio;
+      const adjustedConsumption = adjustedGrossReq * safetyFactor;
 
-    let proj = onHandPrev + sr[i] - adjustedConsumption;
-    let ordered = 0;
+      let proj = onHandPrev + sr[i] - adjustedConsumption;
+      let ordered = 0;
 
-    const releaseIdx = i - leadTime;
-    const overrideReceiptKey = `${item}::${i}`;
+      const releaseIdx = i - leadTime;
+      const overrideReceiptKey = `${item}::${i}`;
 
-    if (receiptOverrides && receiptOverrides[overrideReceiptKey] !== undefined) {
-       ordered = receiptOverrides[overrideReceiptKey];
-    } else {
-       if (proj < safety) {
-          if (releaseIdx < HW && planOverrides && planOverrides[`${item}::${HW}`] !== undefined) {
-             ordered = 0;
-          } else {
-             const need = safety - proj;
-             ordered = Math.ceil(need / lotSize) * lotSize;
-          }
-       }
+      if (receiptOverrides && receiptOverrides[overrideReceiptKey] !== undefined) {
+         ordered = receiptOverrides[overrideReceiptKey];
+      } else {
+         if (proj < safety) {
+            if (releaseIdx < HW && planOverrides && planOverrides[`${item}::${HW}`] !== undefined) {
+               ordered = 0;
+            } else {
+               const need = safety - proj;
+               ordered = Math.ceil(need / lotSize) * lotSize;
+            }
+         }
+      }
+
+      plannedReceipt[i] = ordered;
+      proj += ordered;
+      projOnHand[i] = proj;
+      netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - adjustedConsumption));
+      onHandPrev = proj;
     }
 
-    plannedReceipt[i] = ordered;
-    proj += ordered;
-    projOnHand[i] = proj;
-    netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - adjustedConsumption));
-    onHandPrev = proj;
-  }
     const calcPlannedRelease = new Array(totalCols).fill(0);
     for (let fi = 0; fi < horizon; fi++) {
       const i = HW + fi;
@@ -467,25 +478,6 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
         }
       }
     });
-
-  // --- 1. คำนวณหาค่าเฉลี่ย % Variance จากสัปดาห์ในอดีต (Past Weeks) ---
-    const actualCons = actualByItem[item] || new Array(totalCols).fill(0);
-    // ใช้ตัวแปร gr ที่ประกาศไว้แล้วตั้งแต่บรรทัดบนๆ ได้เลย ไม่ต้องประกาศ const ซ้ำครับ
-    
-    let totalPastVarianceRatio = 0;
-    let activePastWeeksCount = 0;
-
-    for (let i = 0; i < HW; i++) {
-      const pastPlan = gr[i]; // ใช้ gr ตัวหลัก
-      const pastAct = actualCons[i];
-      if (pastPlan > 0 || pastAct > 0) {
-        const ratio = pastPlan > 0 ? (pastAct / pastPlan) : 1;
-        totalPastVarianceRatio += ratio;
-        activePastWeeksCount++;
-      }
-    }
-
-    const avgVarianceRatio = activePastWeeksCount > 0 ? (totalPastVarianceRatio / activePastWeeksCount) : 1;
 
     records[item] = {
       item,
