@@ -1288,10 +1288,10 @@ export default function MRPDashboard() {
     fetchAndParse("Expired", setBatches, "batches");
     
     // สำหรับ PO ต้องโหลด 2 ที่ตามโค้ดเดิมของคุณครับ
-    fetchAndParse("po_pending", setScheduledReceiptsPOOriginal, "poPending"); 
-    fetchAndParse("po_pending", setScheduledReceiptsPO, "poPending");
+    fetchAndParse("Pending", setScheduledReceiptsPOOriginal, "poPending"); 
+    fetchAndParse("Pending", setScheduledReceiptsPO, "poPending");
     
-    fetchAndParse("git", setScheduledReceiptsGIT, "git");
+    fetchAndParse("GIT", setScheduledReceiptsGIT, "git");
 
   }, []); 
   // ---------------------------------------------------------
