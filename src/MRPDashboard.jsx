@@ -9,7 +9,7 @@ const SAMPLE_BOM = [
   { parent_item: "BIKE-100", component_item: "DRIVETRAIN-KIT", qty_per: 1 },
   { parent_item: "WHEEL-ASM", component_item: "RIM-26", qty_per: 1 },
   { parent_item: "WHEEL-ASM", component_item: "HUB-STD", qty_per: 1 },
-  { parent_item: "WHEEL-ASM", component_item: "14000133", qty_per: 32 }, // เปลี่ยนเป็นรหัสตัวเลขให้เห็นภาพ
+  { parent_item: "WHEEL-ASM", component_item: "14000133", qty_per: 32 },
   { parent_item: "DRIVETRAIN-KIT", component_item: "CHAIN-STD", qty_per: 1 },
   { parent_item: "DRIVETRAIN-KIT", component_item: "CRANKSET", qty_per: 1 },
 ];
@@ -21,7 +21,6 @@ const SAMPLE_INVENTORY = [
   { item: "DRIVETRAIN-KIT", description: "Drivetrain kit", unit: "EA", vendor: "GearForge Ltd.", unit_price: 35, on_hand: 25, lead_time_weeks: 2, lot_size: 15, safety_stock: 6, safety_factor: 1, expiry_date: "" },
   { item: "RIM-26", description: "26in alloy rim", unit: "EA", vendor: "Apex Metal Works", unit_price: 9.5, on_hand: 60, lead_time_weeks: 2, lot_size: 50, safety_stock: 20, safety_factor: 1, expiry_date: "" },
   { item: "HUB-STD", description: "Standard hub", unit: "EA", vendor: "SpinCraft Wheels Co.", unit_price: 6.2, on_hand: 45, lead_time_weeks: 2, lot_size: 40, safety_stock: 15, safety_factor: 1, expiry_date: "" },
-  // จงใจลบ 14000133 ออกจาก Inventory เพื่อให้ระบบแจ้งเตือน
   { item: "CHAIN-STD", description: "Standard chain, pre-lubed", unit: "EA", vendor: "GearForge Ltd.", unit_price: 4.8, on_hand: 20, lead_time_weeks: 4, lot_size: 25, safety_stock: 10, safety_factor: 1.5, expiry_date: "" },
   { item: "CRANKSET", description: "Crankset, forged", unit: "EA", vendor: "GearForge Ltd.", unit_price: 12.5, on_hand: 18, lead_time_weeks: 4, lot_size: 20, safety_stock: 8, safety_factor: 1, expiry_date: "" },
 ];
@@ -213,16 +212,13 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     missingInventory: []
   };
 
-  // 1. หาไอเทมที่อยู่ใน Demand แต่ไม่มี BOM 
   Array.from(demandItemsSet).forEach(item => {
     if (!childrenOf[item] || childrenOf[item].length === 0) {
       warnings.demandWithoutBOM.push(item);
     }
   });
 
-  // 2. หาไอเทมที่ไม่มีใน Inventory Master (เช็คเฉพาะ Raw Material ที่รหัสเป็น "ตัวเลขล้วน")
   Array.from(allItems).forEach(item => {
-    // /^\d+$/ หมายถึงสตริงจะต้องประกอบด้วยตัวเลข 0-9 เท่านั้น ตั้งแต่ต้นจนจบ
     if (!invByItem[item] && /^\d+$/.test(item)) {
       warnings.missingInventory.push(item);
     }
@@ -946,7 +942,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
           </table>
         </div>
       )}
-      <div style={{ overflowX: "auto" }}>
+      <div style={{ overflowX: "auto", paddingBottom: "12px" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 }}>
           <thead>
             <tr>
@@ -998,6 +994,14 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                   const isOverridden = r.kind === "prel" && planOverrides && planOverrides[`${rec.item}::${i}`] !== undefined;
                   const isPast = i < historyWeeks;
                   const isEditablePrel = r.kind === "prel" && !isPast;
+                  
+                  let displayVal = "";
+                  if (isEditablePrel) {
+                    // ถ้าถูก Override ไว้ ไม่ว่าจะเป็นเลขอะไร (รวมถึง 0) ให้แสดงเลขนั้น
+                    // ถ้าไม่ได้ Override ให้ดึงค่าปกติมาแสดง ถ้าเป็น 0 ให้เว้นว่างเพื่อโชว์ Placeholder
+                    displayVal = isOverridden ? v : (v ? Math.round(v) : "");
+                  }
+
                   return (
                     <td key={i} style={{
                       textAlign: "right", padding: r.kind === "prel" ? "3px 4px" : "6px 8px", borderTop: `1px solid ${COLORS.paperLine}`,
@@ -1015,8 +1019,9 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                           )}
                           <input
                             type="number" min={0}
-                            value={v || ""}
-                            placeholder="\u2014"
+                            value={displayVal}
+                            placeholder="—"
+                            title={`LT = ${rec.leadTime} wk \u2192 Arrives: ${i + rec.leadTime < weeks.length ? weekLabels[i + rec.leadTime] : "Out of horizon"}`}
                             onChange={(e) => onAdjustPlan(rec.item, i, e.target.value)}
                             style={{
                               width: 42, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5,
