@@ -1295,7 +1295,7 @@ export default function MRPDashboard() {
   
   const [loadedFlags, setLoadedFlags] = useState({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
   const [hydrated, setHydrated] = useState(false);
-  const [hydrating, setHydrating] = useState(true);
+  const [hydrating, setHydrating] = useState(false);
 
 
     // ---------------------------------------------------------
