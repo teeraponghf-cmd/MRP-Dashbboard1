@@ -1134,7 +1134,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                     ? `LT = ${rec.leadTime} wk \u2192 Arrives: ${i + rec.leadTime < weeks.length ? weekLabels[i + rec.leadTime] : "Out of horizon"}`
                     : `Receipt in ${weekLabels[i]} \u2192 Pushes On-Hand up`;
 
-                  return (
+                 return (
                     <td key={i} style={{
                       textAlign: "right", padding: isEditable ? "3px 4px" : "6px 8px", borderTop: `1px solid ${COLORS.paperLine}`,
                       borderLeft: i === historyWeeks ? `2px solid ${COLORS.steel}` : `1px solid ${COLORS.paperLine}`,
@@ -1161,14 +1161,13 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                             }}
                           />
                         </div>
-                ) : (
+                      ) : (
                         v === null || v === undefined ? "—" : (r.kind === "variance" ? (
                           (() => {
                             const plan = rec.grossReq[i];
                             const act = rec.actualConsumption[i];
                             if (plan === 0 && act === 0) return "0";
                             
-                            // สลับฝั่ง Variance เป็น (Calculated - Actual)
                             const invertedV = plan - act;
                             let pctStr = "";
                             if (plan === 0 && act > 0) {
@@ -1189,6 +1188,18 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                         ) : (v ? Math.round(v) : "—"))
                       )}
                     </td>
+                  );
+                })}
+                <td style={{
+                  textAlign: "right", padding: "6px 10px", fontWeight: 700, color: COLORS.ink,
+                  borderTop: `1px solid ${COLORS.paperLine}`, borderLeft: `2px solid ${COLORS.ink}`,
+                  background: COLORS.paper, whiteSpace: "nowrap",
+                }}>
+                  {Math.round(total).toLocaleString()}
+                </td>
+              </tr>
+            );
+          })}                    </td>
                   );
                  <td style={{
         textAlign: "right", padding: "6px 10px", fontWeight: 700, color: COLORS.ink,
