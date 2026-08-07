@@ -275,7 +275,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     gitByItem[it] = new Array(totalCols).fill(0);
   });
 
-  const poDetailsByItem = {};
+const poDetailsByItem = {};
   (poPending || []).forEach((r) => {
     let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item"]);
     let rawWeek = extract(r, "week", ["week", "wk", "cw", "สัปดาห์"], ["week"]);
@@ -285,16 +285,23 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     const idx = parseWeekToIndex(rawWeek, startMonday) + HW;
     if (!poPendingByItem[rawItem]) poPendingByItem[rawItem] = new Array(totalCols).fill(0);
     if (!schedReceiptByItem[rawItem]) schedReceiptByItem[rawItem] = new Array(totalCols).fill(0);
-    if (idx >= 0 && idx < totalCols) {
+
+    // เก็บเข้า "ตารางแสดงผล" เสมอ ไม่ว่า week จะอยู่ในช่วง horizon/history หรือไม่
+    const inRange = idx >= 0 && idx < totalCols;
+    poDetailsByItem[rawItem] = poDetailsByItem[rawItem] || [];
+    poDetailsByItem[rawItem].push({
+      poNumber: String(extract(r, "po_number", ["ponumber", "ponum", "po", "เลขที่po"], ["po", "doc"]) || "?").trim(),
+      vendor: String(extract(r, "vendor", ["vendor", "supplier", "ผู้ขาย"], ["vendor", "sup"]) || "").trim(),
+      quantity: toNum(rawQty), weekIdx: idx, rawWeek: rawWeek,
+      weekLabel: inRange ? weekLabels[idx] : String(rawWeek),
+      mondayDate: inRange ? weekMondayDates[idx] : "",
+      outOfHorizon: !inRange,
+    });
+
+    // ใส่เข้า array คำนวณ MRP เฉพาะที่อยู่ในช่วง horizon เท่านั้น (array ความยาวคงที่)
+    if (inRange) {
       poPendingByItem[rawItem][idx] += toNum(rawQty);
       schedReceiptByItem[rawItem][idx] += toNum(rawQty);
-      poDetailsByItem[rawItem] = poDetailsByItem[rawItem] || [];
-      poDetailsByItem[rawItem].push({
-        poNumber: String(extract(r, "po_number", ["ponumber", "ponum", "po", "เลขที่po"], ["po", "doc"]) || "?").trim(),
-        vendor: String(extract(r, "vendor", ["vendor", "supplier", "ผู้ขาย"], ["vendor", "sup"]) || "").trim(),
-        quantity: toNum(rawQty), weekIdx: idx, rawWeek: rawWeek,
-        weekLabel: weekLabels[idx], mondayDate: weekMondayDates[idx],
-      });
     }
   });
   Object.values(poDetailsByItem).forEach((list) => list.sort((a, b) => a.weekIdx - b.weekIdx));
@@ -971,16 +978,16 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                 <td style={{ padding: "2px 0" }}>DATE (MON)</td>
               </tr>
             </thead>
-            <tbody>
-              {rec.poPendingDetails.map((p, i) => {
-                const origQty = poOriginalQtyMap ? poOriginalQtyMap[`${rec.item}::${p.poNumber}`] : undefined;
-                const isQtyOverridden = origQty !== undefined && origQty !== p.quantity;
-                const origWeek = poOriginalMap ? poOriginalMap[`${rec.item}::${p.poNumber}`] : undefined;
-                const isWeekOverridden = origWeek !== undefined && String(origWeek.week) !== String(p.rawWeek);
-                return (
-                  <tr key={`${p.poNumber}-${i}`}>
-                    <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{p.poNumber}</td>
-                    <td style={{ padding: "2px 8px", color: COLORS.inkSoft }}>{p.vendor || "\u2014"}</td>
+           <tbody>
+  {rec.poPendingDetails.map((p, i) => {
+    const origQty = poOriginalQtyMap ? poOriginalQtyMap[`${rec.item}::${p.poNumber}`] : undefined;
+    const isQtyOverridden = origQty !== undefined && origQty !== p.quantity;
+    const origWeek = poOriginalMap ? poOriginalMap[`${rec.item}::${p.poNumber}`] : undefined;
+    const isWeekOverridden = origWeek !== undefined && String(origWeek.week) !== String(p.rawWeek);
+    return (
+      <tr key={`${p.poNumber}-${i}`}>
+        <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{p.poNumber}</td>
+        <td style={{ padding: "2px 8px", color: COLORS.inkSoft }}>{p.vendor || "\u2014"}</td>
                     <td style={{ padding: "0 4px" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
                         {isQtyOverridden && (
@@ -998,24 +1005,33 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                       </div>
                     </td>
                     <td style={{ padding: "0 4px" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
-                        {isWeekOverridden && (
-                          <button onClick={() => onResetPOWeek(rec.item, p.poNumber)} title={`reset to original (${origWeek.week})`} style={{
-                            border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
-                            fontSize: 9, padding: 0, lineHeight: 1,
-                          }}>&#8635;</button>
+                     <td style={{ padding: "0 4px" }}>
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
+                          {isWeekOverridden && (
+                            <button onClick={() => onResetPOWeek(rec.item, p.poNumber)} title={`reset to original (${origWeek.week})`} style={{
+                              border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
+                              fontSize: 9, padding: 0, lineHeight: 1,
+                            }}>&#8635;</button>
+                          )}
+                          <input type="text" defaultValue={p.rawWeek}
+                            onBlur={(e) => onAdjustPOWeek(rec.item, p.poNumber, e.target.value)}
+                            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+                            title="e.g. 26CW30 or 3"
+                            style={{
+                              width: 56, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
+                              border: `1px solid ${isWeekOverridden ? COLORS.amber : COLORS.paperLine}`, background: "#fff", color: COLORS.ink, padding: "1px 3px",
+                            }} />
+                        </div>
+                        {p.outOfHorizon && (
+                          <span title="วันครบกำหนดอยู่นอกช่วง horizon/history ที่ตั้งไว้ตอนนี้ — ไม่ถูกนำไปคำนวณ MRP" style={{
+                            fontSize: 8.5, padding: "0 4px", color: COLORS.inkSoft,
+                            border: `1px solid ${COLORS.paperLine}`, whiteSpace: "nowrap",
+                          }}>OUT OF VIEW</span>
                         )}
-                        <input type="text" defaultValue={p.rawWeek}
-                          onBlur={(e) => onAdjustPOWeek(rec.item, p.poNumber, e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
-                          title="e.g. 26CW30 or 3"
-                          style={{
-                            width: 56, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
-                            border: `1px solid ${isWeekOverridden ? COLORS.amber : COLORS.paperLine}`, background: "#fff", color: COLORS.ink, padding: "1px 3px",
-                          }} />
                       </div>
                     </td>
-                    <td style={{ padding: "2px 0", color: COLORS.inkSoft }}>{p.mondayDate}</td>
+                    <td style={{ padding: "2px 0", color: COLORS.inkSoft }}>{p.mondayDate || "\u2014"}</td>
                   </tr>
                 );
               })}
