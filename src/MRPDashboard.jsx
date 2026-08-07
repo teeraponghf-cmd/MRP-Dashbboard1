@@ -1625,16 +1625,8 @@ const [hydrating, setHydrating] = useState(true);
           <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 700, color: COLORS.ink }}>
             {new Date().toISOString().slice(0, 10)}
           </div>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft, marginTop: 2 }}>
-            {hydrating ? "restoring last session\u2026" : (
-              <span>
-                data auto-saved{" "}
-                <button onClick={clearSavedData} style={{
-                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.rust,
-                  background: "transparent", border: "none", padding: 0, cursor: "pointer", textDecoration: "underline",
-                }}>clear</button>
-              </span>
-            )}
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft, marginTop: 2 }}>
+            {hydrating ? "loading data from SharePoint\u2026" : "data loaded successfully"}
           </div>
         </div>
       </div>
