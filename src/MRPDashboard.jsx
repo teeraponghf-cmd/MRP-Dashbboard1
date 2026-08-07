@@ -1372,7 +1372,7 @@ export default function MRPDashboard() {
   const [hydrated, setHydrated] = useState(false);
 const [hydrating, setHydrating] = useState(true);
   // ---------------------------------------------------------
-  // ดึงข้อมูลจาก SharePoint (แบบต่อคิว ป้องกัน Server บล็อก)
+  // ดึงข้อมูลจาก SharePoint และ Local Storage (เมื่อโหลดหน้าแรก)
   // ---------------------------------------------------------
   useEffect(() => {
     const PA_BASE_URL = "https://defaultb0a451413bd9434690304b8b30ca77.f2.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/22/workflows/98efa377cbb84f8f92a8cecf69d97cf9/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=GYjaw1ng23DOassgX6tsKKM2JEA88g_dSH7pun4kOw8";
@@ -1388,10 +1388,10 @@ const [hydrating, setHydrating] = useState(true);
           header: true,
           skipEmptyLines: true,
           complete: (res) => {
-            // รองรับการนำข้อมูลไปใส่ State หลายๆ ตัวพร้อมกัน จากการดึงแค่รอบเดียว
+            // รองรับทั้งแบบ Array และ Function ปกติ
             if (Array.isArray(stateSetters)) {
               stateSetters.forEach(setter => setter(res.data));
-            } else {
+            } else if (typeof stateSetters === 'function') {
               stateSetters(res.data);
             }
             setLoadedFlags((f) => ({ ...f, [flagKey]: true }));
@@ -1403,26 +1403,77 @@ const [hydrating, setHydrating] = useState(true);
     };
 
     const loadAllData = async () => {
-      // 🔑 ใส่ await ข้างหน้า เพื่อบังคับให้โหลดเสร็จทีละไฟล์ ค่อยโหลดไฟล์ต่อไป
+      // 1. โหลดค่าที่คุณเคยแก้ไขไว้ในระบบกลับขึ้นมาก่อน
+      const savedPlan = await storageGet("planOverrides");
+      if (savedPlan) setPlanOverrides(savedPlan);
+
+      const savedReceipt = await storageGet("receiptOverrides");
+      if (savedReceipt) setReceiptOverrides(savedReceipt);
+
+      const savedOrderStatus = await storageGet("orderStatus");
+      if (savedOrderStatus) setOrderStatus(savedOrderStatus);
+
+      const savedHorizon = await storageGet("horizon");
+      if (savedHorizon) setHorizon(savedHorizon);
+
+      const savedHistory = await storageGet("historyWeeks");
+      if (savedHistory !== null) setHistoryWeeks(savedHistory);
+
+      // 2. เริ่มดึงข้อมูล Master จาก SharePoint
       await fetchAndParse("bom", setBom, "bom");
       await fetchAndParse("Onhand", setInventory, "inventory");
       await fetchAndParse("Demand Schedule", setDemand, "demand");
       await fetchAndParse("Actual Consumption", setActualConsumption, "actualConsumption");
       await fetchAndParse("Expired", setBatches, "batches");
       
-      // 🎯 สำหรับ PO Pending: ดึงแค่ "ครั้งเดียว" แล้วแบ่งข้อมูลให้ทั้ง State ปกติ และ Original
-      await fetchAndParse("Pending", [setScheduledReceiptsPOOriginal, setScheduledReceiptsPO], "poPending");
+      // 🎯 สำหรับ PO Pending: เช็กก่อนว่ามีข้อมูลที่คุณ Override ตัวเลขไว้ในเครื่องไหม
+      await fetchAndParse("Pending", async (data) => {
+        setScheduledReceiptsPOOriginal(data);
+        const savedPO = await storageGet("scheduledReceiptsPO");
+        if (savedPO && savedPO.length > 0) {
+          setScheduledReceiptsPO(savedPO); // ใช้ข้อมูลที่คุณแก้ไว้
+        } else {
+          setScheduledReceiptsPO(data); // ใช้ข้อมูลตั้งต้น
+        }
+      }, "poPending");
       
       await fetchAndParse("GIT", setScheduledReceiptsGIT, "git");
 
       // โหลดครบทุกไฟล์แล้ว ค่อยปิดสถานะจอโหลด
       setHydrating(false);
-      setHydrated(true);
+      setHydrated(true); 
     };
 
     loadAllData();
 
   }, []);
+
+  // ---------------------------------------------------------
+  // Auto-Save: บันทึกข้อมูลทันทีที่มีการเปลี่ยนแปลงบนหน้าจอ
+  // ---------------------------------------------------------
+  useEffect(() => {
+    if (hydrated) storageSet("planOverrides", planOverrides);
+  }, [planOverrides, hydrated]);
+
+  useEffect(() => {
+    if (hydrated) storageSet("receiptOverrides", receiptOverrides);
+  }, [receiptOverrides, hydrated]);
+
+  useEffect(() => {
+    if (hydrated) storageSet("orderStatus", orderStatus);
+  }, [orderStatus, hydrated]);
+
+  useEffect(() => {
+    if (hydrated) storageSet("horizon", horizon);
+  }, [horizon, hydrated]);
+
+  useEffect(() => {
+    if (hydrated) storageSet("historyWeeks", historyWeeks);
+  }, [historyWeeks, hydrated]);
+
+  useEffect(() => {
+    if (hydrated) storageSet("scheduledReceiptsPO", scheduledReceiptsPO);
+  }, [scheduledReceiptsPO, hydrated]);
 
   const handleFile = useCallback((key, setter) => (file) => {
     parseCSV(file, (rows) => {
