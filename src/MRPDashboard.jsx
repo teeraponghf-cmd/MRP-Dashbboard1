@@ -1197,9 +1197,10 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
       }}>
         {Math.round(total).toLocaleString()}
       </td>
-    </tr>
-  );
-})}
+    </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
