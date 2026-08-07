@@ -565,47 +565,40 @@ const poDetailsByItem = {};
 }
 // ---------- Storage adapter ----------
 const STORAGE_PREFIX = "mrp_dashboard:";
+
 async function storageGet(key) {
-  try {
-    if (typeof window !== "undefined" && window.storage && typeof window.storage.get === "function") {
-      const res = await window.storage.get(STORAGE_PREFIX + key, false);
-      return res ? JSON.parse(res.value) : null;
-    }
-  } catch (e) { }
   try {
     if (typeof window !== "undefined" && window.localStorage) {
       const raw = window.localStorage.getItem(STORAGE_PREFIX + key);
       return raw ? JSON.parse(raw) : null;
     }
-  } catch (e) { }
+  } catch (e) {
+    console.error("Storage Get Error:", e);
+  }
   return null;
 }
+
 async function storageSet(key, value) {
-  try {
-    if (typeof window !== "undefined" && window.storage && typeof window.storage.set === "function") {
-      await window.storage.set(STORAGE_PREFIX + key, JSON.stringify(value), false);
-      return true;
-    }
-  } catch (e) { }
   try {
     if (typeof window !== "undefined" && window.localStorage) {
       window.localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value));
       return true;
     }
-  } catch (e) { }
+  } catch (e) {
+    console.error("Storage Set Error:", e);
+  }
   return false;
 }
+
 async function storageClearAll(keys) {
   for (const key of keys) {
     try {
-      if (typeof window !== "undefined" && window.storage && typeof window.storage.delete === "function") {
-        await window.storage.delete(STORAGE_PREFIX + key, false);
-        continue;
+      if (typeof window !== "undefined" && window.localStorage) {
+        window.localStorage.removeItem(STORAGE_PREFIX + key);
       }
-    } catch (e) { }
-    try {
-      if (typeof window !== "undefined" && window.localStorage) window.localStorage.removeItem(STORAGE_PREFIX + key);
-    } catch (e) { }
+    } catch (e) { 
+      console.error("Storage Clear Error:", e);
+    }
   }
 }
 
