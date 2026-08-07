@@ -1058,6 +1058,32 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                 </td>
               ))}
             </tr>
+            <thead>
+  <tr>
+    <td style={{ padding: "6px 10px", color: COLORS.inkSoft, whiteSpace: "nowrap", borderTop: `1px solid ${COLORS.paperLine}` }}>
+      WEEK<div style={{ fontSize: 9, fontWeight: 400 }}>(Mon)</div>
+    </td>
+    {weeks.map((w, i) => (
+      <td key={w} style={{
+        textAlign: "right", padding: "6px 8px", color: i < historyWeeks ? "#9AA5B1" : COLORS.inkSoft,
+        borderTop: `1px solid ${COLORS.paperLine}`,
+        borderLeft: i === historyWeeks ? `2px solid ${COLORS.steel}` : `1px solid ${COLORS.paperLine}`,
+        whiteSpace: "nowrap", background: i < historyWeeks ? "#F1F1EA" : "transparent",
+      }}>
+        {weekLabels[i]}
+        <div style={{ fontSize: 9, fontWeight: 400, color: "inherit", opacity: 0.85 }}>{weekDates[i]}{i < historyWeeks ? " (past)" : ""}</div>
+      </td>
+    ))}
+    <td style={{
+      textAlign: "right", padding: "6px 10px", color: COLORS.ink, fontWeight: 700,
+      borderTop: `1px solid ${COLORS.paperLine}`, borderLeft: `2px solid ${COLORS.ink}`,
+      whiteSpace: "nowrap", background: COLORS.paper,
+    }}>
+      TOTAL
+      <div style={{ fontSize: 9, fontWeight: 400, color: COLORS.inkSoft }}>{weeks.length} wk</div>
+    </td>
+  </tr>
+</thead>
           </thead>
           <tbody>
             {rows.map((r) => (
@@ -1164,9 +1190,16 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                       )}
                     </td>
                   );
-                })}
-              </tr>
-            ))}
+                 <td style={{
+        textAlign: "right", padding: "6px 10px", fontWeight: 700, color: COLORS.ink,
+        borderTop: `1px solid ${COLORS.paperLine}`, borderLeft: `2px solid ${COLORS.ink}`,
+        background: COLORS.paper, whiteSpace: "nowrap",
+      }}>
+        {Math.round(total).toLocaleString()}
+      </td>
+    </tr>
+  );
+})}
           </tbody>
         </table>
       </div>
