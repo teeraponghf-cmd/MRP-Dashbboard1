@@ -1323,17 +1323,13 @@ export default function MRPDashboard() {
   const [loadedFlags, setLoadedFlags] = useState({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
   const [hydrated, setHydrated] = useState(false);
 const [hydrating, setHydrating] = useState(true);
-    // ---------------------------------------------------------
-    // >>>>> เริ่มวางโค้ดใหม่ตรงนี้ครับ (บรรทัด 1250) <<<<<
-    // ---------------------------------------------------------
-   // ---------------------------------------------------------
-  // ดึงข้อมูลจาก SharePoint (ดึงทุกไฟล์)
+  // ---------------------------------------------------------
+  // ดึงข้อมูลจาก SharePoint (แบบต่อคิว ป้องกัน Server บล็อก)
   // ---------------------------------------------------------
   useEffect(() => {
-    // 1. วาง URL ของ Power Automate ตรงนี้ (ใช้ URL เดิมที่เทสผ่านเมื่อกี้ได้เลย)
     const PA_BASE_URL = "https://defaultb0a451413bd9434690304b8b30ca77.f2.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/22/workflows/98efa377cbb84f8f92a8cecf69d97cf9/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=GYjaw1ng23DOassgX6tsKKM2JEA88g_dSH7pun4kOw8";
 
-    const fetchAndParse = async (filename, stateSetter, flagKey) => {
+    const fetchAndParse = async (filename, stateSetters, flagKey) => {
       try {
         const response = await fetch(`${PA_BASE_URL}&filename=${filename}`);
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
@@ -1344,7 +1340,12 @@ const [hydrating, setHydrating] = useState(true);
           header: true,
           skipEmptyLines: true,
           complete: (res) => {
-            stateSetter(res.data);
+            // รองรับการนำข้อมูลไปใส่ State หลายๆ ตัวพร้อมกัน จากการดึงแค่รอบเดียว
+            if (Array.isArray(stateSetters)) {
+              stateSetters.forEach(setter => setter(res.data));
+            } else {
+              stateSetters(res.data);
+            }
             setLoadedFlags((f) => ({ ...f, [flagKey]: true }));
           }
         });
@@ -1353,23 +1354,27 @@ const [hydrating, setHydrating] = useState(true);
       }
     };
 
-    // 2. สั่งเรียกทุกไฟล์พร้อมกัน
-    // *ข้อควรระวัง: คำในเครื่องหมายคำพูด (เช่น "bom", "inventory") 
-    // ต้องสะกดให้ตรงกับชื่อไฟล์บน SharePoint เป๊ะๆ (ตัวพิมพ์เล็ก/ใหญ่มีผล)
-    
-    fetchAndParse("bom", setBom, "bom");
-    fetchAndParse("Onhand", setInventory, "inventory");
-    fetchAndParse("Demand Schedule", setDemand, "demand");
-    fetchAndParse("Actual Consumption", setActualConsumption, "actualConsumption");
-    fetchAndParse("Expired", setBatches, "batches");
-    
-    // สำหรับ PO ต้องโหลด 2 ที่ตามโค้ดเดิมของคุณครับ
-    fetchAndParse("Pending", setScheduledReceiptsPOOriginal, "poPending"); 
-    fetchAndParse("Pending", setScheduledReceiptsPO, "poPending");
-    
-    fetchAndParse("GIT", setScheduledReceiptsGIT, "git");
+    const loadAllData = async () => {
+      // 🔑 ใส่ await ข้างหน้า เพื่อบังคับให้โหลดเสร็จทีละไฟล์ ค่อยโหลดไฟล์ต่อไป
+      await fetchAndParse("bom", setBom, "bom");
+      await fetchAndParse("Onhand", setInventory, "inventory");
+      await fetchAndParse("Demand Schedule", setDemand, "demand");
+      await fetchAndParse("Actual Consumption", setActualConsumption, "actualConsumption");
+      await fetchAndParse("Expired", setBatches, "batches");
+      
+      // 🎯 สำหรับ PO Pending: ดึงแค่ "ครั้งเดียว" แล้วแบ่งข้อมูลให้ทั้ง State ปกติ และ Original
+      await fetchAndParse("Pending", [setScheduledReceiptsPOOriginal, setScheduledReceiptsPO], "poPending");
+      
+      await fetchAndParse("GIT", setScheduledReceiptsGIT, "git");
 
-  }, []); 
+      // โหลดครบทุกไฟล์แล้ว ค่อยปิดสถานะจอโหลด
+      setHydrating(false);
+      setHydrated(true);
+    };
+
+    loadAllData();
+
+  }, []);
 
   const handleFile = useCallback((key, setter) => (file) => {
     parseCSV(file, (rows) => {
