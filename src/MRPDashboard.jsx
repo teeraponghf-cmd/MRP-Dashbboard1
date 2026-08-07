@@ -1004,7 +1004,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                           }} />
                       </div>
                     </td>
-                    <td style={{ padding: "0 4px" }}>
+              
                      <td style={{ padding: "0 4px" }}>
                       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
