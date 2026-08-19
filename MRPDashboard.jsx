@@ -19,8 +19,8 @@ const SAMPLE_INVENTORY = [
   { item: "FRAME-STD", description: "Standard frame, welded", unit: "EA", vendor: "Apex Metal Works", unit_price: 42, on_hand: 40, lead_time_weeks: 3, lot_size: 20, safety_stock: 10, safety_factor: 1.2, expiry_date: "" },
   { item: "WHEEL-ASM", description: "Wheel assembly, built", unit: "EA", vendor: "SpinCraft Wheels Co.", unit_price: 28, on_hand: 30, lead_time_weeks: 2, lot_size: 10, safety_stock: 8, safety_factor: 1, expiry_date: "" },
   { item: "DRIVETRAIN-KIT", description: "Drivetrain kit", unit: "EA", vendor: "GearForge Ltd.", unit_price: 35, on_hand: 25, lead_time_weeks: 2, lot_size: 15, safety_stock: 6, safety_factor: 1, expiry_date: "" },
-  { item: "RIM-26", description: "26in alloy rim", unit: "EA", vendor: "Apex Metal Works", unit_price: 9.5, on_hand: 60, lead_time_weeks: 2, lot_size: 50, safety_stock: 20, safety_factor: 1, expiry_date: "" },
-  { item: "HUB-STD", description: "Standard hub", unit: "EA", vendor: "SpinCraft Wheels Co.", unit_price: 6.2, on_hand: 45, lead_time_weeks: 2, lot_size: 40, safety_stock: 15, safety_factor: 1, expiry_date: "" },
+  { item: "RIM-26", description: "26in alloy rim", unit: "EA", vendor: "Apex Metal Works", unit_price: 9.5, on_hand: 60, lead_time_weeks: 2, lot_size: 50, safety_stock: 20, safety_factor: 1, expiry_date: "", mold_family: "MOLD-RIM-A" },
+  { item: "HUB-STD", description: "Standard hub", unit: "EA", vendor: "SpinCraft Wheels Co.", unit_price: 6.2, on_hand: 45, lead_time_weeks: 2, lot_size: 40, safety_stock: 15, safety_factor: 1, expiry_date: "", mold_family: "MOLD-RIM-A" },
   { item: "CHAIN-STD", description: "Standard chain, pre-lubed", unit: "EA", vendor: "GearForge Ltd.", unit_price: 4.8, on_hand: 20, lead_time_weeks: 4, lot_size: 25, safety_stock: 10, safety_factor: 1.5, expiry_date: "" },
   { item: "CRANKSET", description: "Crankset, forged", unit: "EA", vendor: "GearForge Ltd.", unit_price: 12.5, on_hand: 18, lead_time_weeks: 4, lot_size: 20, safety_stock: 8, safety_factor: 1, expiry_date: "" },
 ];
@@ -106,7 +106,49 @@ function extract(r, exactProp, cands, subs) {
   return getField(r, cands, subs);
 }
 
+const PO_NUMBER_CANDS = ["ponumber", "ponum", "ponbr", "po", "ponr", "pono", "เลขที่po"];
+const PO_NUMBER_SUBS = ["po", "ref", "doc"];
+
+// รวมค่าที่ผู้ใช้ปรับเอง (poOverrides) เข้ากับข้อมูล PO Pending ต้นฉบับที่ดึงมาจาก SharePoint
+// ทำเป็นชั้นแยกต่างหาก เพื่อให้รอดพ้นการถูกทับตอนดึงข้อมูลใหม่ (refresh)
+function applyPoOverrides(originalRows, overrides) {
+  if (!Array.isArray(originalRows) || !overrides || Object.keys(overrides).length === 0) return originalRows;
+  return originalRows.map((r) => {
+    const rPo = getField(r, PO_NUMBER_CANDS, PO_NUMBER_SUBS) || "?";
+    const key = `${r.item}::${rPo}`;
+    const ov = overrides[key];
+    if (!ov) return r;
+    return {
+      ...r,
+      ...(ov.quantity !== undefined ? { quantity: ov.quantity } : {}),
+      ...(ov.week !== undefined ? { week: ov.week } : {}),
+    };
+  });
+}
+
 // ---------- ISO week helpers ----------
+// รองรับวันที่หลายรูปแบบ (ISO YYYY-MM-DD และแบบวัน-เดือน-ปี เช่น DD-MM-YY / DD-MM-YYYY / DD/MM/YYYY)
+function parseFlexibleDate(dateStr) {
+  const s = String(dateStr || "").trim();
+  if (!s) return null;
+  // ISO: YYYY-MM-DD หรือ YYYY/MM/DD (ปีอยู่หน้า 4 หลัก)
+  let m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
+  if (m) {
+    const dt = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+    return isNaN(dt) ? null : dt;
+  }
+  // วัน-เดือน-ปี: DD-MM-YYYY / DD-MM-YY / DD/MM/YYYY / DD/MM/YY
+  m = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2,4})$/);
+  if (m) {
+    let year = parseInt(m[3], 10);
+    if (year < 100) year += 2000;
+    const dt = new Date(Date.UTC(year, parseInt(m[2], 10) - 1, parseInt(m[1], 10)));
+    return isNaN(dt) ? null : dt;
+  }
+  // สุดท้าย ลองให้ JS parse เอง (เผื่อรูปแบบอื่นๆ ที่ยังพอตีความได้)
+  const dt = new Date(s);
+  return isNaN(dt) ? null : dt;
+}
 function mondayOfWeek(date) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
   const day = d.getUTCDay() || 7;
@@ -146,8 +188,8 @@ function parseWeekToIndex(weekValue, startMonday) {
   return Number.isFinite(n) ? n - 1 : 0; 
 }
 
-// ---------- MRP engine ----------
-// ---------- MRP engine ----------
+// ---------- MRP engine (FIXED) ----------
+// ---------- MRP engine (FIXED) ----------
 function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides }) {
   if (!Array.isArray(bom) || !Array.isArray(inventory)) {
     return { weeks: [], weekLabels: [], weekDates: [], weekMondayDates: [], records: {}, order: [], childrenOf: {}, historyWeeks: 0, warnings: {} };
@@ -156,7 +198,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
   const HW = Math.max(0, historyWeeks || 0);
   const totalCols = HW + horizon;
   const weeks = Array.from({ length: totalCols }, (_, i) => i + 1);
-  
+
   const invByItem = {};
   inventory.forEach((r) => {
     let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item", "part", "รหัส"]);
@@ -167,18 +209,19 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       description: extract(r, "description", ["description", "desc", "name", "ชื่อ"], ["desc", "ชื่อ"]),
       unit: extract(r, "unit", ["unit", "uom", "measure", "หน่วย"], ["unit", "uom"]),
       vendor: extract(r, "vendor", ["vendor", "supplier", "ผู้ขาย"], ["vendor", "sup"]),
+      moldFamily: extract(r, "mold_family", ["moldfamily", "moldset", "mold", "familyname", "familygroup"], ["mold", "family"]),
       unit_price: toNum(extract(r, "unit_price", ["unitprice", "price", "cost", "ราคา"], ["price"])),
       on_hand: toNum(extract(r, "on_hand", ["onhand", "stock", "inventory", "คงคลัง"], ["hand", "stock"])),
       lead_time_weeks: toNum(extract(r, "lead_time_weeks", ["leadtime", "lt", "leadtimeweeks"], ["lead", "lt"])),
       lot_size: toNum(extract(r, "lot_size", ["lotsize", "moq", "lot"], ["lot", "moq"]), 1),
-      safety_stock: toNum(extract(r, "safety_stock", ["safetystock", "ss"], ["safety", "ss"])),
+      safety_stock: toNum(extract(r, "safety_stock", ["safetystock", "ss"], ["safety", "ss"]), 1),
       safety_factor: toNum(extract(r, "safety_factor", ["safetyfactor", "sf"], ["factor"]), 1),
       expiry_date: extract(r, "expiry_date", ["expirydate", "expiry", "expdate"], ["exp"])
     };
   });
 
-  const childrenOf = {}; 
-  const parentsOf = {}; 
+  const childrenOf = {};
+  const parentsOf = {};
   bom.forEach((r) => {
     let p = extract(r, "parent_item", ["parentitem", "parent", "assembly", "fg", "แม่"], ["parent"]);
     let c = extract(r, "component_item", ["componentitem", "component", "child", "part", "rm", "ลูก"], ["comp", "child"]);
@@ -253,7 +296,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     return `${dd}/${mm}`;
   });
   const weekMondayDates = weeks.map((_, i) => new Date(startMonday.getTime() + (i - HW) * 7 * 86400000).toISOString().slice(0, 10));
-  
+
   (demand || []).forEach((r) => {
     let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item"]);
     let rawWeek = extract(r, "week", ["week", "wk", "cw", "สัปดาห์"], ["week"]);
@@ -274,8 +317,8 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     poPendingByItem[it] = new Array(totalCols).fill(0);
     gitByItem[it] = new Array(totalCols).fill(0);
   });
-  
-  const poDetailsByItem = {};
+
+const poDetailsByItem = {};
   (poPending || []).forEach((r) => {
     let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item"]);
     let rawWeek = extract(r, "week", ["week", "wk", "cw", "สัปดาห์"], ["week"]);
@@ -285,20 +328,27 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     const idx = parseWeekToIndex(rawWeek, startMonday) + HW;
     if (!poPendingByItem[rawItem]) poPendingByItem[rawItem] = new Array(totalCols).fill(0);
     if (!schedReceiptByItem[rawItem]) schedReceiptByItem[rawItem] = new Array(totalCols).fill(0);
-    if (idx >= 0 && idx < totalCols) {
+
+    // เก็บเข้า "ตารางแสดงผล" เสมอ ไม่ว่า week จะอยู่ในช่วง horizon/history หรือไม่
+    const inRange = idx >= 0 && idx < totalCols;
+    poDetailsByItem[rawItem] = poDetailsByItem[rawItem] || [];
+    poDetailsByItem[rawItem].push({
+      poNumber: String(extract(r, "po_number", ["ponumber", "ponum", "po", "เลขที่po"], ["po", "doc"]) || "?").trim(),
+      vendor: String(extract(r, "vendor", ["vendor", "supplier", "ผู้ขาย"], ["vendor", "sup"]) || "").trim(),
+      quantity: toNum(rawQty), weekIdx: idx, rawWeek: rawWeek,
+      weekLabel: inRange ? weekLabels[idx] : String(rawWeek),
+      mondayDate: inRange ? weekMondayDates[idx] : "",
+      outOfHorizon: !inRange,
+    });
+
+    // ใส่เข้า array คำนวณ MRP เฉพาะที่อยู่ในช่วง horizon เท่านั้น (array ความยาวคงที่)
+    if (inRange) {
       poPendingByItem[rawItem][idx] += toNum(rawQty);
       schedReceiptByItem[rawItem][idx] += toNum(rawQty);
-      poDetailsByItem[rawItem] = poDetailsByItem[rawItem] || [];
-      poDetailsByItem[rawItem].push({
-        poNumber: String(extract(r, "po_number", ["ponumber", "ponum", "po", "เลขที่po"], ["po", "doc"]) || "?").trim(),
-        vendor: String(extract(r, "vendor", ["vendor", "supplier", "ผู้ขาย"], ["vendor", "sup"]) || "").trim(),
-        quantity: toNum(rawQty), weekIdx: idx, rawWeek: rawWeek,
-        weekLabel: weekLabels[idx], mondayDate: weekMondayDates[idx],
-      });
     }
   });
   Object.values(poDetailsByItem).forEach((list) => list.sort((a, b) => a.weekIdx - b.weekIdx));
-  
+
   (git || []).forEach((r) => {
     let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item"]);
     let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "จำนวน"], ["qty", "quant"]);
@@ -335,7 +385,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     rawItem = String(rawItem).trim().toUpperCase();
     const qty = toNum(rawQty);
     const dateStr = String(rawExpiry || "").trim();
-    const expiryDate = dateStr ? new Date(dateStr + "T00:00:00Z") : null;
+    const expiryDate = parseFlexibleDate(dateStr);
     const valid = expiryDate && !isNaN(expiryDate);
     const weeksToExpiry = valid ? Math.floor((expiryDate - startMonday) / (7 * 86400000)) : null;
     batchesByItem[rawItem] = batchesByItem[rawItem] || [];
@@ -354,28 +404,35 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     const lotSize = Math.max(1, toNum(inv.lot_size, 1));
     const baseSafety = Math.max(0, toNum(inv.safety_stock, 0));
     const safetyFactor = toNum(inv.safety_factor, 1) || 1;
+    // FIX #2: safetyFactor scales the SAFETY STOCK TARGET only.
+    // It must NOT also scale demand/consumption (that double-counts the buffer).
     const safety = baseSafety * safetyFactor;
 
     const itemBatches = batchesByItem[item] || [];
+    const masterOnHand = toNum(inv.on_hand, 0);
     let rawOnHand, effectiveOnHand, expired, expiringSoon, weeksToExpiry, expiryDateStr;
 
     if (itemBatches.length > 0) {
-      rawOnHand = itemBatches.reduce((s, b) => s + b.quantity, 0);
-      effectiveOnHand = itemBatches.filter((b) => !b.expired).reduce((s, b) => s + b.quantity, 0);
+      // ไฟล์ Batches/Expired มักเป็นแค่รายการ lot ที่ใกล้/หมดอายุ ไม่ใช่ batch ledger ครบทุกก้อน
+      // ยึด on_hand จาก Inventory Master เป็นยอดรวมหลักเสมอ (เผื่อผลรวม batch มากกว่า กันไม่ให้ยอดหาย)
+      const batchTotal = itemBatches.reduce((s, b) => s + b.quantity, 0);
+      const expiredFromBatches = itemBatches.filter((b) => b.expired).reduce((s, b) => s + b.quantity, 0);
+      rawOnHand = Math.max(masterOnHand, batchTotal);
+      effectiveOnHand = Math.max(0, rawOnHand - expiredFromBatches);
       expired = effectiveOnHand === 0 && rawOnHand > 0;
       expiringSoon = itemBatches.some((b) => !b.expired && b.expiringSoon);
       const nearest = itemBatches.find((b) => !b.expired);
       weeksToExpiry = nearest ? nearest.weeksToExpiry : null;
       expiryDateStr = nearest ? nearest.expiryDate : (itemBatches[0] ? itemBatches[0].expiryDate : "");
     } else {
-      rawOnHand = toNum(inv.on_hand, 0);
+      rawOnHand = masterOnHand;
       expired = false;
       expiringSoon = false;
       weeksToExpiry = null;
       expiryDateStr = String(inv.expiry_date || "").trim();
       if (expiryDateStr) {
-        const expiryDate = new Date(expiryDateStr + "T00:00:00Z");
-        if (!isNaN(expiryDate)) {
+        const expiryDate = parseFlexibleDate(expiryDateStr);
+        if (expiryDate) {
           weeksToExpiry = Math.floor((expiryDate - startMonday) / (7 * 86400000));
           expired = weeksToExpiry < 0;
           expiringSoon = !expired && weeksToExpiry <= 4;
@@ -384,40 +441,69 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       effectiveOnHand = expired ? 0 : rawOnHand;
     }
 
+    // แถวแยกต่างหาก "Expired quantity": ปริมาณของที่หมดอายุ/กำลังจะหมดอายุ ในแต่ละสัปดาห์
+    // (ของที่หมดอายุไปแล้วก่อนช่วงเวลาที่มองอยู่ จะรวมไว้ที่คอลัมน์แรกสุดของ history)
+    const expiredByWeek = new Array(totalCols).fill(0);
+    if (itemBatches.length > 0) {
+      itemBatches.forEach((b) => {
+        if (b.weeksToExpiry === null || b.weeksToExpiry === undefined) return;
+        let idx = b.weeksToExpiry + HW;
+        if (idx < 0) idx = 0;
+        if (idx < totalCols) expiredByWeek[idx] += b.quantity;
+      });
+    } else if (expiryDateStr && weeksToExpiry !== null) {
+      let idx = weeksToExpiry + HW;
+      if (idx < 0) idx = 0;
+      if (idx < totalCols) expiredByWeek[idx] += rawOnHand;
+    }
+
     const gr = grossReq[item] || new Array(totalCols).fill(0);
     const sr = schedReceiptByItem[item] || new Array(totalCols).fill(0);
     const actualCons = actualByItem[item] || new Array(totalCols).fill(0);
 
-    // --- คำนวณค่าเฉลี่ย % Variance จากอดีต ไว้ล่วงหน้าตั้งแต่ต้นลูป ---
-    let totalPastVarianceRatio = 0;
-    let activePastWeeksCount = 0;
-
+    // คำนวณสัดส่วนรวม (Aggregate Factor) จากอดีตอย่างปลอดภัย
+    let totalPastPlan = 0;
+    let totalPastActual = 0;
     for (let i = 0; i < HW; i++) {
-      const pastPlan = gr[i];
-      const pastAct = actualCons[i];
-      if (pastPlan > 0 || pastAct > 0) {
-        const ratio = pastPlan > 0 ? (pastAct / pastPlan) : 1;
-        totalPastVarianceRatio += ratio;
-        activePastWeeksCount++;
-      }
+      totalPastPlan += gr[i] || 0;
+      totalPastActual += actualCons[i] || 0;
     }
-    const avgVarianceRatio = activePastWeeksCount > 0 ? (totalPastVarianceRatio / activePastWeeksCount) : 1;
+    // FIX #1: if there is no actual-consumption data at all for this item
+    // (totalPastActual === 0, e.g. the actualConsumption sheet is empty or
+    // doesn't cover this item), we must NOT infer a 0-ratio and let it get
+    // clamped to 0.5 below. Missing data means "no adjustment", i.e. factor = 1.
+    const consumptionFactor =
+      (totalPastPlan > 0 && totalPastActual > 0)
+        ? (totalPastActual / totalPastPlan)
+        : 1;
 
     const pastActualTotal = actualCons.slice(0, HW).reduce((a, b) => a + b, 0);
     const pastActualAvg = HW > 0 ? pastActualTotal / HW : 0;
 
-    const consumption = gr.map((v) => v * safetyFactor);
+    // NOTE: this "consumption" field is for display only and intentionally
+    // does NOT include safetyFactor or adjustedFactor anymore (see FIX #2/#3
+    // below) — it should reflect raw gross requirement so it ties out with
+    // what's shown to the user. Safety buffer is applied separately via
+    // `safety`, and the aggregate adjustment is applied via adjustedConsumption
+    // (now also stored per-row so the numbers are traceable).
+    const consumption = gr.map((v) => v);
     const projOnHand = new Array(totalCols).fill(null);
     const netReq = new Array(totalCols).fill(null);
     const plannedReceipt = new Array(totalCols).fill(null);
     const pastDue = new Array(totalCols).fill(false);
+    const adjustedConsumptionArr = new Array(totalCols).fill(null);
 
     let onHandPrev = effectiveOnHand;
     for (let fi = 0; fi < horizon; fi++) {
       const i = HW + fi;
-      
-      const adjustedGrossReq = (gr[i] || 0) * avgVarianceRatio;
-      const adjustedConsumption = adjustedGrossReq * safetyFactor;
+
+      // ปรับความต้องการในอนาคตด้วยสัดส่วนรวมที่เสถียร (จำกัดช่วง 0.5x-2.0x)
+      const adjustedFactor = Math.max(0.5, Math.min(2.0, consumptionFactor));
+      // FIX #2: removed the extra `* safetyFactor` here — safetyFactor already
+      // raises the `safety` target above, so multiplying demand by it too was
+      // double-applying the buffer.
+      const adjustedConsumption = (gr[i] || 0) * adjustedFactor;
+      adjustedConsumptionArr[i] = adjustedConsumption;
 
       let proj = onHandPrev + sr[i] - adjustedConsumption;
       let ordered = 0;
@@ -484,6 +570,7 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       description: inv.description || item,
       unit: inv.unit || "EA",
       vendor: String(inv.vendor || "").trim(),
+      moldFamily: String(inv.moldFamily || "").trim(),
       unitPrice: toNum(inv.unit_price, 0),
       level: level[item] || 0,
       leadTime,
@@ -491,12 +578,14 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       safety,
       baseSafety,
       safetyFactor,
+      consumptionFactor,
       onHand: rawOnHand,
       usableOnHand: effectiveOnHand,
       expiredQty: Math.max(0, rawOnHand - effectiveOnHand),
       onHandValue: rawOnHand * (toNum(inv.unit_price, 0)),
       usableValue: effectiveOnHand * (toNum(inv.unit_price, 0)),
       expiredValue: Math.max(0, rawOnHand - effectiveOnHand) * (toNum(inv.unit_price, 0)),
+      expiredByWeek,
       batches: itemBatches,
       expiryDate: expiryDateStr,
       expired,
@@ -504,10 +593,24 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       weeksToExpiry,
       grossReq: gr,
       consumption,
+      adjustedConsumption: adjustedConsumptionArr,
+      // Per-row comparison helpers: null in history weeks (adjustedConsumption
+      // is only computed for future/forecast weeks), numeric only where both
+      // sides exist so the UI can show "-" instead of 0 when there's nothing
+      // to compare yet.
+      consumptionDiff: consumption.map((v, i) =>
+        adjustedConsumptionArr[i] === null ? null : (adjustedConsumptionArr[i] - v)
+      ),
+      consumptionDiffPct: consumption.map((v, i) =>
+        adjustedConsumptionArr[i] === null || v === 0 ? null : ((adjustedConsumptionArr[i] - v) / v) * 100
+      ),
       scheduledReceipts: sr,
-      poPending: poPendingByItem[item] || new Array(horizon).fill(0),
+      // FIX #4: fallback arrays now match totalCols so indices line up with
+      // every other per-item array (previously defaulted to length `horizon`,
+      // which is HW columns short and would misalign with weekLabels/weekDates).
+      poPending: poPendingByItem[item] || new Array(totalCols).fill(0),
       poPendingDetails: poDetailsByItem[item] || [],
-      git: gitByItem[item] || new Array(horizon).fill(0),
+      git: gitByItem[item] || new Array(totalCols).fill(0),
       actualConsumption: actualCons,
       pastActualTotal,
       pastActualAvg,
@@ -526,7 +629,6 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
 
   return { weeks, weekLabels, weekDates, weekMondayDates, records, order, childrenOf, historyWeeks: HW, warnings };
 }
-
 // ---------- Storage adapter ----------
 const STORAGE_PREFIX = "mrp_dashboard:";
 async function storageGet(key) {
@@ -594,16 +696,20 @@ function downloadCSV(filename, rows) {
 
 // ---------- UI ----------
 const COLORS = {
-  ink: "#16233A",
-  inkSoft: "#5C6B7D",
-  paper: "#E9EAE2",
-  paperLine: "#CBCBBB",
-  card: "#F4F4EE",
-  steel: "#3F6386",
-  steelDeep: "#2A4A66",
-  amber: "#C9821F",
-  rust: "#AE402B",
-  moss: "#57764E",
+  ink: "#101828",
+  inkSoft: "#667085",
+  paper: "#F5F6FA",
+  paperLine: "#E3E6EC",
+  card: "#FFFFFF",
+  steel: "#3B5EDB",
+  steelDeep: "#26418F",
+  amber: "#D97706",
+  rust: "#DC2626",
+  moss: "#16A34A",
+  shadow: "0 1px 2px rgba(16,24,40,0.06), 0 1px 3px rgba(16,24,40,0.08)",
+  shadowLg: "0 4px 8px rgba(16,24,40,0.06), 0 2px 4px rgba(16,24,40,0.08)",
+  radius: 10,
+  radiusSm: 6,
 };
 
 function UploadSlot({ label, hint, onFile, loaded, count, onSample }) {
@@ -611,6 +717,8 @@ function UploadSlot({ label, hint, onFile, loaded, count, onSample }) {
     <div style={{
       border: `1px solid ${COLORS.paperLine}`,
       background: COLORS.card,
+      borderRadius: COLORS.radius,
+      boxShadow: COLORS.shadow,
       padding: "12px 14px",
       display: "flex",
       flexDirection: "column",
@@ -627,7 +735,8 @@ function UploadSlot({ label, hint, onFile, loaded, count, onSample }) {
         <label style={{
           display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
           fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.steel,
-          border: `1px solid ${COLORS.steel}`, padding: "4px 8px",
+          border: `1px solid ${COLORS.steel}`, borderRadius: COLORS.radiusSm, padding: "4px 8px",
+          transition: "background 0.15s ease",
         }}>
           <Upload size={12} /> upload .csv
           <input type="file" accept=".csv" style={{ display: "none" }} onChange={(e) => {
@@ -636,19 +745,23 @@ function UploadSlot({ label, hint, onFile, loaded, count, onSample }) {
         </label>
         <button onClick={onSample} style={{
           fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.inkSoft,
-          border: `1px solid ${COLORS.paperLine}`, background: "transparent", padding: "4px 8px", cursor: "pointer",
+          border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radiusSm, background: "transparent", padding: "4px 8px", cursor: "pointer",
+          transition: "background 0.15s ease, border-color 0.15s ease",
         }}>use sample</button>
       </div>
     </div>
   );
 }
 
-function KPI({ label, value, tone, icon: Icon }) {
+function KPI({ label, value, tone, icon: Icon, mobile }) {
   const toneColor = tone === "rust" ? COLORS.rust : tone === "amber" ? COLORS.amber : tone === "moss" ? COLORS.moss : COLORS.steelDeep;
   return (
     <div style={{
       background: COLORS.card, border: `1px solid ${COLORS.paperLine}`, borderTop: `3px solid ${toneColor}`,
-      padding: "14px 16px", flex: 1, minWidth: 150,
+      borderRadius: COLORS.radius, boxShadow: COLORS.shadow,
+      padding: "14px 16px", flex: mobile ? "0 0 auto" : 1, minWidth: mobile ? 160 : 150,
+      scrollSnapAlign: mobile ? "start" : "none",
+      transition: "transform 0.15s ease, box-shadow 0.15s ease",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, color: toneColor, marginBottom: 6 }}>
         <Icon size={14} />
@@ -678,7 +791,7 @@ function TreeRow({ item, records, childrenOf, selected, onSelect, depth, onlyWit
           display: "flex", flexDirection: "column", gap: 0, cursor: "pointer",
           paddingLeft: depth * 16 + 6, paddingRight: 6, paddingTop: 4, paddingBottom: 4,
           background: isSelected ? COLORS.steel : "transparent",
-          color: isSelected ? "#F4F4EE" : COLORS.ink,
+          color: isSelected ? "#FFFFFF" : COLORS.ink,
           borderLeft: isSelected ? `3px solid ${COLORS.amber}` : "3px solid transparent",
         }}
       >
@@ -698,8 +811,8 @@ function TreeRow({ item, records, childrenOf, selected, onSelect, depth, onlyWit
           {rec.parentsCount > 1 && (
             <span title={`shared across ${rec.parentsCount} assemblies: ${rec.parentItems.join(", ")}`} style={{
               display: "flex", alignItems: "center", gap: 2, fontSize: 9.5, fontFamily: "'IBM Plex Mono', monospace",
-              color: isSelected ? "#EAF1F6" : COLORS.steel, border: `1px solid ${isSelected ? "#EAF1F6" : COLORS.steel}`,
-              padding: "0 3px", lineHeight: "14px",
+              color: isSelected ? "#EEF2FF" : COLORS.steel, border: `1px solid ${isSelected ? "#EEF2FF" : COLORS.steel}`,
+              padding: "0 4px", lineHeight: "14px", borderRadius: 999,
             }}>
               <Layers size={9} /> {rec.parentsCount}
             </span>
@@ -711,7 +824,7 @@ function TreeRow({ item, records, childrenOf, selected, onSelect, depth, onlyWit
         </div>
         <div style={{
           fontFamily: "Inter, sans-serif", fontSize: 10, paddingLeft: 17,
-          color: isSelected ? "#DCE3E9" : COLORS.inkSoft,
+          color: isSelected ? "#E4E7EC" : COLORS.inkSoft,
           whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
         }}>
           {rec.description} · {rec.unit}
@@ -761,7 +874,7 @@ function VendorGroupRow({ vendor, items, records, selected, onSelect, onlyWithOr
             display: "flex", flexDirection: "column", cursor: "pointer",
             paddingLeft: 22, paddingRight: 6, paddingTop: 4, paddingBottom: 4,
             background: isSelected ? COLORS.steel : "transparent",
-            color: isSelected ? "#F4F4EE" : COLORS.ink,
+            color: isSelected ? "#FFFFFF" : COLORS.ink,
             borderLeft: isSelected ? `3px solid ${COLORS.amber}` : "3px solid transparent",
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -769,7 +882,7 @@ function VendorGroupRow({ vendor, items, records, selected, onSelect, onlyWithOr
               {critical && <CircleAlert size={12} color={isSelected ? "#FFD9CE" : COLORS.rust} />}
               {!critical && shortage && <AlertTriangle size={11} color={isSelected ? "#FFE9C6" : COLORS.amber} />}
             </div>
-            <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, paddingLeft: 17, color: isSelected ? "#DCE3E9" : COLORS.inkSoft, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, paddingLeft: 17, color: isSelected ? "#E4E7EC" : COLORS.inkSoft, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
               {rec.description} {"\u00b7"} {rec.unit}
             </div>
           </div>
@@ -791,19 +904,22 @@ function VendorGroupTree({ groups, records, selected, onSelect, onlyWithOrders, 
   );
 }
 
-function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustPlan, onResetPlanOverride, onAdjustReceipt, onResetReceiptOverride, onAdjustPOQty, poOriginalQtyMap, onResetPOQty, onAdjustPOWeek, onResetPOWeek, poOriginalMap, planOverrides, receiptOverrides }) {
+function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustPlan, onResetPlanOverride, onAdjustReceipt, onResetReceiptOverride, onAdjustPOQty, poOriginalQtyMap, onResetPOQty, onAdjustPOWeek, onResetPOWeek, poOriginalMap, planOverrides, receiptOverrides, isMobile, draftRefs, onAdjustDraftRef, moldFamilyMembers }) {
   if (!rec) return null;
   const rows = [
     { label: "Gross requirements (calculated)", data: rec.grossReq, kind: "gr" },
-    { label: `Consumption used for planning (\u00d7${rec.safetyFactor})`, data: rec.consumption, kind: "consumption" },
+    { label: `Consumption used for planning (\u00d7${rec.consumptionFactor.toFixed(2)})`, data: rec.consumption, kind: "consumption" },
     { label: "Actual consumption (issued)", data: rec.actualConsumption, kind: "actual" },
    { label: "Variance (Qty / %)", data: rec.consumptionVariance, kind: "variance" },
     { label: "PO pending", data: rec.poPending, kind: "po" },
     { label: "Goods in transit (GIT)", data: rec.git, kind: "git" },
+    { label: "Expired quantity", data: rec.expiredByWeek, kind: "expline" },
     { label: "Projected on hand", data: rec.projOnHand, kind: "poh" },
+    { label: `Safety stock remaining (On-hand \u2212 SS ${rec.safety})`, data: rec.projOnHand.map((v) => (v === null || v === undefined ? null : v - rec.safety)), kind: "ssline" },
     { label: "Net requirements", data: rec.netReq, kind: "nr" },
     { label: "Planned order receipt", data: rec.plannedReceipt, kind: "por" },
     { label: "Planned order release", data: rec.plannedRelease, kind: "prel" },
+    { label: "Lead time (wk)", data: new Array(weeks.length).fill(rec.leadTime), kind: "ltline" },
   ];
 
   const formattedAvg = rec.pastActualAvg.toLocaleString(undefined, { maximumFractionDigits: 1 });
@@ -837,10 +953,10 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
   // --- จบการคำนวณ ---
 
   return (
-    <div style={{ border: `1px solid ${COLORS.ink}`, background: COLORS.card }}>
+    <div style={{ border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radius, boxShadow: COLORS.shadowLg, background: COLORS.card, overflow: "hidden" }}>
       {/* title block */}
       <div style={{
-        display: "grid", gridTemplateColumns: "repeat(7, 1fr)", borderBottom: `1px solid ${COLORS.ink}`,
+        display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(8, 1fr)", borderBottom: `1px solid ${COLORS.paperLine}`,
         fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
       }}>
         {[
@@ -848,6 +964,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
           ["UNIT", rec.unit],
           ["LEAD TIME (WK)", rec.leadTime],
           ["LOT SIZE / SS", `${rec.lotSize} / ${rec.baseSafety}${rec.safetyFactor !== 1 ? ` \u00d7${rec.safetyFactor} = ${rec.safety}` : ""}`],
+          ["ON HAND (usable/total)", `${rec.usableOnHand.toLocaleString()} / ${rec.onHand.toLocaleString()} ${rec.unit}`],
           [`PAST ${historyWeeks}W AVG`, (
             <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <span>{formattedAvg} {rec.unit}/wk ({rec.pastActualTotal.toLocaleString()} total)</span>
@@ -864,10 +981,12 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
             : "\u2014"],
         ].map(([k, v], i) => (
           <div key={k} style={{
-            padding: "6px 10px", borderRight: i < 6 ? `1px solid ${COLORS.paperLine}` : "none",
-            background: k === "EXPIRY" && rec.expired ? COLORS.rust : k === "EXPIRY" && rec.expiringSoon ? "#F3DDBC" : k.includes("AVG") ? "#E3E9D6" : "transparent",
+            padding: "6px 10px",
+            borderRight: isMobile ? (i % 2 === 0 ? `1px solid ${COLORS.paperLine}` : "none") : (i < 7 ? `1px solid ${COLORS.paperLine}` : "none"),
+            borderBottom: isMobile ? (i < 6 ? `1px solid ${COLORS.paperLine}` : "none") : "none",
+            background: k === "EXPIRY" && rec.expired ? COLORS.rust : k === "EXPIRY" && rec.expiringSoon ? "#FEF3C7" : k.includes("AVG") ? "#DCFCE7" : k.includes("ON HAND") ? "#E0E7FF" : "transparent",
           }}>
-            <div style={{ color: k === "EXPIRY" && rec.expired ? "#F6D9D3" : k.includes("AVG") ? COLORS.moss : COLORS.inkSoft, letterSpacing: "0.05em" }}>{k}</div>
+            <div style={{ color: k === "EXPIRY" && rec.expired ? "#FEE2E2" : k.includes("AVG") ? COLORS.moss : k.includes("ON HAND") ? COLORS.steelDeep : COLORS.inkSoft, letterSpacing: "0.05em" }}>{k}</div>
             <div style={{ color: k === "EXPIRY" && rec.expired ? "#fff" : k === "EXPIRY" && rec.expiringSoon ? COLORS.amber : COLORS.ink, fontWeight: 600, fontSize: 12 }}>{v}</div>
           </div>
         ))}
@@ -878,6 +997,11 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
       {rec.parentsCount > 1 && (
         <div style={{ padding: "0 10px 8px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.steel, display: "flex", alignItems: "center", gap: 4 }}>
           <Layers size={11} /> common component — used in {rec.parentsCount} assemblies: {rec.parentItems.join(", ")}
+        </div>
+      )}
+      {rec.moldFamily && moldFamilyMembers && moldFamilyMembers.length > 0 && (
+        <div style={{ padding: "0 10px 8px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.amber, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+          <Layers size={11} /> mold family "{rec.moldFamily}" — สั่งพร้อมกันเป็นเซ็ตกับ: {moldFamilyMembers.join(", ")}
         </div>
       )}
       {rec.batches.length > 0 ? (
@@ -903,9 +1027,9 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                   <td style={{ padding: "2px 8px" }}>{b.expiryDate || "\u2014"}</td>
                   <td style={{ padding: "2px 0" }}>
                     <span style={{
-                      fontSize: 9.5, padding: "1px 5px",
+                      fontSize: 9.5, padding: "1px 7px", borderRadius: 999, fontWeight: 600,
                       color: b.expired ? "#fff" : b.expiringSoon ? COLORS.amber : COLORS.moss,
-                      background: b.expired ? COLORS.rust : b.expiringSoon ? "#F3DDBC" : "#E3E9D6",
+                      background: b.expired ? COLORS.rust : b.expiringSoon ? "#FEF3C7" : "#DCFCE7",
                     }}>{b.expired ? "EXPIRED" : b.expiringSoon ? `${b.weeksToExpiry}w left` : "OK"}</span>
                   </td>
                 </tr>
@@ -942,16 +1066,16 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                 <td style={{ padding: "2px 0" }}>DATE (MON)</td>
               </tr>
             </thead>
-            <tbody>
-              {rec.poPendingDetails.map((p, i) => {
-                const origQty = poOriginalQtyMap ? poOriginalQtyMap[`${rec.item}::${p.poNumber}`] : undefined;
-                const isQtyOverridden = origQty !== undefined && origQty !== p.quantity;
-                const origWeek = poOriginalMap ? poOriginalMap[`${rec.item}::${p.poNumber}`] : undefined;
-                const isWeekOverridden = origWeek !== undefined && String(origWeek.week) !== String(p.rawWeek);
-                return (
-                  <tr key={`${p.poNumber}-${i}`}>
-                    <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{p.poNumber}</td>
-                    <td style={{ padding: "2px 8px", color: COLORS.inkSoft }}>{p.vendor || "\u2014"}</td>
+           <tbody>
+  {rec.poPendingDetails.map((p, i) => {
+    const origQty = poOriginalQtyMap ? poOriginalQtyMap[`${rec.item}::${p.poNumber}`] : undefined;
+    const isQtyOverridden = origQty !== undefined && origQty !== p.quantity;
+    const origWeek = poOriginalMap ? poOriginalMap[`${rec.item}::${p.poNumber}`] : undefined;
+    const isWeekOverridden = origWeek !== undefined && String(origWeek.week) !== String(p.rawWeek);
+    return (
+      <tr key={`${p.poNumber}-${i}`}>
+        <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{p.poNumber}</td>
+        <td style={{ padding: "2px 8px", color: COLORS.inkSoft }}>{p.vendor || "\u2014"}</td>
                     <td style={{ padding: "0 4px" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
                         {isQtyOverridden && (
@@ -968,25 +1092,34 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                           }} />
                       </div>
                     </td>
-                    <td style={{ padding: "0 4px" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
-                        {isWeekOverridden && (
-                          <button onClick={() => onResetPOWeek(rec.item, p.poNumber)} title={`reset to original (${origWeek.week})`} style={{
-                            border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
-                            fontSize: 9, padding: 0, lineHeight: 1,
-                          }}>&#8635;</button>
+              
+                     <td style={{ padding: "0 4px" }}>
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
+                          {isWeekOverridden && (
+                            <button onClick={() => onResetPOWeek(rec.item, p.poNumber)} title={`reset to original (${origWeek.week})`} style={{
+                              border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
+                              fontSize: 9, padding: 0, lineHeight: 1,
+                            }}>&#8635;</button>
+                          )}
+                          <input type="text" defaultValue={p.rawWeek}
+                            onBlur={(e) => onAdjustPOWeek(rec.item, p.poNumber, e.target.value)}
+                            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+                            title="e.g. 26CW30 or 3"
+                            style={{
+                              width: 56, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
+                              border: `1px solid ${isWeekOverridden ? COLORS.amber : COLORS.paperLine}`, background: "#fff", color: COLORS.ink, padding: "1px 3px",
+                            }} />
+                        </div>
+                        {p.outOfHorizon && (
+                          <span title="วันครบกำหนดอยู่นอกช่วง horizon/history ที่ตั้งไว้ตอนนี้ — ไม่ถูกนำไปคำนวณ MRP" style={{
+                            fontSize: 8.5, padding: "0 5px", color: COLORS.inkSoft, borderRadius: 999,
+                            border: `1px solid ${COLORS.paperLine}`, whiteSpace: "nowrap",
+                          }}>OUT OF VIEW</span>
                         )}
-                        <input type="text" defaultValue={p.rawWeek}
-                          onBlur={(e) => onAdjustPOWeek(rec.item, p.poNumber, e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
-                          title="e.g. 26CW30 or 3"
-                          style={{
-                            width: 56, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
-                            border: `1px solid ${isWeekOverridden ? COLORS.amber : COLORS.paperLine}`, background: "#fff", color: COLORS.ink, padding: "1px 3px",
-                          }} />
                       </div>
                     </td>
-                    <td style={{ padding: "2px 0", color: COLORS.inkSoft }}>{p.mondayDate}</td>
+                    <td style={{ padding: "2px 0", color: COLORS.inkSoft }}>{p.mondayDate || "\u2014"}</td>
                   </tr>
                 );
               })}
@@ -1006,40 +1139,59 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                   textAlign: "right", padding: "6px 8px", color: i < historyWeeks ? "#9AA5B1" : COLORS.inkSoft,
                   borderTop: `1px solid ${COLORS.paperLine}`,
                   borderLeft: i === historyWeeks ? `2px solid ${COLORS.steel}` : `1px solid ${COLORS.paperLine}`,
-                  whiteSpace: "nowrap", background: i < historyWeeks ? "#F1F1EA" : "transparent",
+                  whiteSpace: "nowrap", background: i < historyWeeks ? "#F1F2F6" : "transparent",
                 }}>
                   {weekLabels[i]}
                   <div style={{ fontSize: 9, fontWeight: 400, color: "inherit", opacity: 0.85 }}>{weekDates[i]}{i < historyWeeks ? " (past)" : ""}</div>
                 </td>
               ))}
+              <td style={{
+                textAlign: "right", padding: "6px 10px", color: COLORS.ink, fontWeight: 700,
+                borderTop: `1px solid ${COLORS.paperLine}`, borderLeft: `2px solid ${COLORS.steel}`,
+                whiteSpace: "nowrap", background: COLORS.paper,
+              }}>
+                TOTAL
+                <div style={{ fontSize: 9, fontWeight: 400, color: COLORS.inkSoft }}>{weeks.length} wk</div>
+              </td>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {rows.map((r) => {
+              const total = r.data.reduce((sum, v) => sum + (typeof v === "number" ? v : 0), 0);
+              return (
               <tr key={r.kind}>
                 <td style={{ padding: "6px 10px", color: COLORS.ink, whiteSpace: "nowrap", borderTop: `1px solid ${COLORS.paperLine}` }}>{r.label}</td>
                 {r.data.map((v, i) => {
                   let color = COLORS.ink;
                   let bg = "transparent";
                   if (r.kind === "poh" && v < 0) { color = "#fff"; bg = COLORS.rust; }
-                  else if (r.kind === "poh" && v !== null && v < rec.safety) { bg = "#F3DDBC"; }
+                  else if (r.kind === "poh" && v !== null && v < rec.safety) { bg = "#FEF3C7"; }
                   if (r.kind === "prel" && v > 0 && rec.pastDue[i]) { color = "#fff"; bg = COLORS.rust; }
-                  else if (r.kind === "prel" && v > 0) { bg = "#DCE7EE"; color = COLORS.steelDeep; }
-                  if (r.kind === "po" && v > 0) { bg = "#F3DDBC"; color = COLORS.amber; }
-                  if (r.kind === "git" && v > 0) { bg = "#E3E9D6"; color = COLORS.moss; }
-                  if (r.kind === "consumption" && rec.safetyFactor !== 1 && v > 0) { bg = "#DCE7EE"; color = COLORS.steelDeep; }
-                  if (r.kind === "actual" && v > 0) { bg = "#E9E4F0"; color = "#5A4A78"; }
+                  else if (r.kind === "prel" && v > 0) { bg = "#E0E7FF"; color = COLORS.steelDeep; }
+                  if (r.kind === "po" && v > 0) { bg = "#FEF3C7"; color = COLORS.amber; }
+                  if (r.kind === "git" && v > 0) { bg = "#DCFCE7"; color = COLORS.moss; }
+                  if (r.kind === "expline" && v > 0) { bg = COLORS.rust; color = "#fff"; }
+                  if (r.kind === "consumption" && rec.consumptionFactor !== 1 && v > 0) { bg = "#E0E7FF"; color = COLORS.steelDeep; }
+                  if (r.kind === "actual" && v > 0) { bg = "#EDE9FE"; color = "#6D28D9"; }
+                  if (r.kind === "ssline" && v !== null) {
+                    // แดง: stock ต่ำกว่า safety stock ของ item นั้นเอง
+                    // เหลือง: ยังไม่ต่ำกว่า SS แต่ buffer ที่เหลือ (stock - SS) น้อยกว่าอัตราเบิกใช้เฉลี่ย 1 สัปดาห์ (Past AVG) — ใกล้ทะลุ SS ภายในไม่ถึง 1 สัปดาห์
+                    if (v < 0) { bg = COLORS.rust; color = "#fff"; }
+                    else if (rec.pastActualAvg > 0 && v < rec.pastActualAvg) { bg = "#FEF3C7"; color = COLORS.amber; }
+                    else { bg = "#DCFCE7"; color = COLORS.moss; }
+                  }
+                  if (r.kind === "ltline") { bg = "transparent"; color = COLORS.steel; }
                   
                   // Variance Rendering
                   if (r.kind === "variance" && v !== null) {
                     if (v === 0 && rec.grossReq[i] === 0 && rec.actualConsumption[i] === 0) {
                       bg = "transparent"; color = COLORS.inkSoft; 
                     } else if (Math.abs(v) < 0.5) { 
-                      bg = "#E3E9D6"; color = COLORS.moss; 
+                      bg = "#DCFCE7"; color = COLORS.moss; 
                     } else if (v > 0) { 
-                      bg = "#F3DDBC"; color = COLORS.amber; 
+                      bg = "#FEF3C7"; color = COLORS.amber; 
                     } else { 
-                      bg = "#F6D9D3"; color = COLORS.rust; 
+                      bg = "#FEE2E2"; color = COLORS.rust; 
                     }
                   }
 
@@ -1063,41 +1215,56 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                     ? `LT = ${rec.leadTime} wk \u2192 Arrives: ${i + rec.leadTime < weeks.length ? weekLabels[i + rec.leadTime] : "Out of horizon"}`
                     : `Receipt in ${weekLabels[i]} \u2192 Pushes On-Hand up`;
 
-                  return (
+                return (
                     <td key={i} style={{
                       textAlign: "right", padding: isEditable ? "3px 4px" : "6px 8px", borderTop: `1px solid ${COLORS.paperLine}`,
                       borderLeft: i === historyWeeks ? `2px solid ${COLORS.steel}` : `1px solid ${COLORS.paperLine}`,
-                      color, background: isPast && bg === "transparent" ? "#F1F1EA" : bg,
+                      color, background: isPast && bg === "transparent" ? "#F1F2F6" : bg,
                       outline: isOverridden ? `2px solid ${COLORS.amber}` : "none", outlineOffset: "-2px",
                     }}>
                       {isEditable ? (
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2 }}>
-                          {isOverridden && (
-                            <button onClick={() => onReset(rec.item, i)} title="reset to calculated value" style={{
-                              border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
-                              fontSize: 9, padding: 0, lineHeight: 1,
-                            }}>&#8635;</button>
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2 }}>
+                            {isOverridden && (
+                              <button onClick={() => onReset(rec.item, i)} title="reset to calculated value" style={{
+                                border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
+                                fontSize: 9, padding: 0, lineHeight: 1,
+                              }}>&#8635;</button>
+                            )}
+                            <input
+                              type="number" min={0}
+                              value={displayVal}
+                              placeholder="—"
+                              title={tooltipMsg}
+                              onChange={(e) => onAdjust(rec.item, i, e.target.value)}
+                              style={{
+                                width: 42, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5,
+                                border: "none", background: "transparent", color, padding: "3px 2px",
+                              }}
+                            />
+                          </div>
+                          {displayVal !== "" && (
+                            <input
+                              type="text"
+                              value={draftRefs[`${rec.item}::${i}::${r.kind}`] || ""}
+                              placeholder={r.kind === "prel" ? "PR#" : "PO#"}
+                              title={r.kind === "prel" ? "เลขที่ Draft PR (กรอกเองถ้าระบบยังไม่ได้ดึงมา)" : "เลขที่ Draft PO (กรอกเองถ้าระบบยังไม่ได้ดึงมา)"}
+                              onChange={(e) => onAdjustDraftRef(rec.item, i, r.kind, e.target.value)}
+                              style={{
+                                width: 44, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 9,
+                                border: `1px solid ${COLORS.paperLine}`, borderRadius: 4, background: "#fff",
+                                color: COLORS.steel, padding: "1px 3px",
+                              }}
+                            />
                           )}
-                          <input
-                            type="number" min={0}
-                            value={displayVal}
-                            placeholder="—"
-                            title={tooltipMsg}
-                            onChange={(e) => onAdjust(rec.item, i, e.target.value)}
-                            style={{
-                              width: 42, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5,
-                              border: "none", background: "transparent", color, padding: "3px 2px",
-                            }}
-                          />
                         </div>
-                ) : (
+                      ) : (
                         v === null || v === undefined ? "—" : (r.kind === "variance" ? (
                           (() => {
                             const plan = rec.grossReq[i];
                             const act = rec.actualConsumption[i];
                             if (plan === 0 && act === 0) return "0";
                             
-                            // สลับฝั่ง Variance เป็น (Calculated - Actual)
                             const invertedV = plan - act;
                             let pctStr = "";
                             if (plan === 0 && act > 0) {
@@ -1115,13 +1282,21 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                               </div>
                             );
                           })()
-                        ) : (v ? Math.round(v) : "—"))
+                        ) : ((r.kind === "ssline" || r.kind === "poh") ? Math.round(v) : (v ? Math.round(v) : "—")))
                       )}
                     </td>
                   );
                 })}
+                <td style={{
+                  textAlign: "right", padding: "6px 10px", fontWeight: 700, color: COLORS.ink,
+                  borderTop: `1px solid ${COLORS.paperLine}`, borderLeft: `2px solid ${COLORS.steel}`,
+                  background: COLORS.paper, whiteSpace: "nowrap",
+                }}>
+                  {r.kind === "ssline" || r.kind === "ltline" ? "\u2014" : Math.round(total).toLocaleString()}
+                </td>
               </tr>
-            ))}
+            );
+          })}
           </tbody>
         </table>
       </div>
@@ -1130,14 +1305,15 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
 }
 
 const STATUS_OPTIONS = [
-  { value: "pending", label: "Pending", bg: "#DCE7EE", color: COLORS.steelDeep },
-  { value: "released", label: "Released to buyer", bg: "#F3DDBC", color: COLORS.amber },
-  { value: "ordered", label: "PO placed", bg: "#E3E9D6", color: COLORS.moss },
-  { value: "received", label: "Received", bg: "#E9E4F0", color: "#5A4A78" },
+  { value: "pending", label: "Pending", bg: "#E0E7FF", color: COLORS.steelDeep },
+  { value: "released", label: "Released to buyer", bg: "#FEF3C7", color: COLORS.amber },
+  { value: "ordered", label: "PO placed", bg: "#DCFCE7", color: COLORS.moss },
+  { value: "received", label: "Received", bg: "#EDE9FE", color: "#6D28D9" },
 ];
 
-function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus }) {
+function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus, selectedItem }) {
   const [hideReceived, setHideReceived] = useState(false);
+  const [onlySelected, setOnlySelected] = useState(true);
   const rows = [];
   Object.values(records).forEach((rec) => {
     rec.plannedRelease.forEach((v, i) => {
@@ -1153,20 +1329,43 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
   });
   rows.sort((a, b) => a.releaseIdx - b.releaseIdx);
 
+  // เช็คว่า item ในเซ็ต mold family เดียวกัน มีแผน planned release คนละสัปดาห์ไหม — ถ้าใช่ เตือนให้รวมสั่งพร้อมกัน
+  const familyMisalignment = [];
+  {
+    const byFamily = {};
+    rows.forEach((r) => {
+      const fam = records[r.item] && records[r.item].moldFamily;
+      if (!fam) return;
+      byFamily[fam] = byFamily[fam] || {};
+      byFamily[fam][r.releaseWeek] = byFamily[fam][r.releaseWeek] || new Set();
+      byFamily[fam][r.releaseWeek].add(r.item);
+    });
+    Object.entries(byFamily).forEach(([fam, byWeek]) => {
+      const weeksList = Object.keys(byWeek);
+      if (weeksList.length > 1) {
+        familyMisalignment.push({
+          fam,
+          detail: weeksList.map((w) => `${w}: ${Array.from(byWeek[w]).join(", ")}`).join(" · "),
+        });
+      }
+    });
+  }
+
   const getEntry = (key) => orderStatus[key] || { status: "pending", poNumber: "" };
   const updateEntry = (key, patch) => {
     setOrderStatus((prev) => ({ ...prev, [key]: { ...getEntry(key), ...patch } }));
   };
 
-  const visibleRows = hideReceived ? rows.filter((r) => getEntry(r.key).status !== "received") : rows;
-  const counts = rows.reduce((acc, r) => {
+  const scopedRows = onlySelected && selectedItem ? rows.filter((r) => r.item === selectedItem) : rows;
+  const visibleRows = hideReceived ? scopedRows.filter((r) => getEntry(r.key).status !== "received") : scopedRows;
+  const counts = scopedRows.reduce((acc, r) => {
     const s = getEntry(r.key).status;
     acc[s] = (acc[s] || 0) + 1;
     return acc;
   }, {});
 
   const exportCSV = () => {
-    const data = rows.map((r) => ({
+    const data = scopedRows.map((r) => ({
       item: r.item, description: records[r.item].description, unit: r.unit,
       release_week: r.releaseWeek, due_week: r.receiptWeek, quantity: r.qty,
       lead_time_weeks: r.leadTime, past_due: r.pastDue ? "yes" : "no",
@@ -1176,7 +1375,7 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
   };
 
   return (
-    <div style={{ border: `1px solid ${COLORS.paperLine}`, background: COLORS.card }}>
+    <div style={{ border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radius, boxShadow: COLORS.shadowLg, background: COLORS.card, overflow: "hidden" }}>
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 12px",
         borderBottom: `1px solid ${COLORS.paperLine}`, flexWrap: "wrap", rowGap: 6,
@@ -1185,9 +1384,22 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
           display: "flex", alignItems: "center", gap: 6, fontFamily: "'Space Grotesk', sans-serif",
           fontSize: 12, fontWeight: 700, letterSpacing: "0.04em", color: COLORS.ink, textTransform: "uppercase",
         }}>
-          <ClipboardList size={14} color={COLORS.steel} /> Order Planning ({rows.length})
+          <ClipboardList size={14} color={COLORS.steel} /> Order Planning ({scopedRows.length})
+          {onlySelected && selectedItem && (
+            <span style={{
+              fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 600, textTransform: "none",
+              color: COLORS.steel, background: "#E0E7FF", border: `1px solid ${COLORS.steel}`, padding: "1px 8px", borderRadius: 999,
+            }}>{selectedItem}</span>
+          )}
         </span>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <label style={{
+            display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
+            fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft,
+          }}>
+            <input type="checkbox" checked={onlySelected} onChange={(e) => setOnlySelected(e.target.checked)} style={{ margin: 0 }} />
+            selected item only
+          </label>
           <label style={{
             display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
             fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft,
@@ -1198,21 +1410,31 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
           <button onClick={exportCSV} style={{
             display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
             fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.steel,
-            border: `1px solid ${COLORS.steel}`, background: "transparent", padding: "3px 8px",
+            border: `1px solid ${COLORS.steel}`, background: "transparent", padding: "3px 8px", borderRadius: COLORS.radiusSm,
           }}><Download size={11} /> export order plan</button>
         </div>
       </div>
       <div style={{ display: "flex", gap: 10, padding: "6px 12px", borderBottom: `1px solid ${COLORS.paperLine}`, flexWrap: "wrap" }}>
-        {STATUS_OPTIONS.map((s) => (
+        {STATUS_OPTIONS.filter((s) => !onlySelected || (counts[s.value] || 0) > 0).map((s) => (
           <span key={s.value} style={{
             fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: s.color,
             display: "flex", alignItems: "center", gap: 4,
           }}>
-            <span style={{ width: 8, height: 8, background: s.bg, border: `1px solid ${s.color}`, display: "inline-block" }} />
+            <span style={{ width: 8, height: 8, borderRadius: 999, background: s.bg, border: `1px solid ${s.color}`, display: "inline-block" }} />
             {s.label}: {counts[s.value] || 0}
           </span>
         ))}
       </div>
+      {familyMisalignment.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: "8px 12px", borderBottom: `1px solid ${COLORS.paperLine}`, background: "#FEF3C7" }}>
+          {familyMisalignment.map((f) => (
+            <div key={f.fam} style={{ display: "flex", alignItems: "flex-start", gap: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#92400E" }}>
+              <Layers size={12} style={{ marginTop: 1, flexShrink: 0 }} />
+              <span><b>mold family "{f.fam}"</b> มีแผนสั่งคนละสัปดาห์ — พิจารณารวมสั่งพร้อมกัน: {f.detail}</span>
+            </div>
+          ))}
+        </div>
+      )}
       <div style={{ maxHeight: 300, overflowY: "auto" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 }}>
           <thead>
@@ -1230,7 +1452,7 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
                 <tr key={r.key}>
                   <td style={{ padding: "5px 10px", textAlign: "right", borderBottom: `1px solid ${COLORS.paperLine}` }}>
                     {r.releaseWeek}{r.pastDue && (
-                      <span style={{ marginLeft: 4, fontSize: 9, color: "#fff", background: COLORS.rust, padding: "1px 4px" }}>LATE</span>
+                      <span style={{ marginLeft: 4, fontSize: 9, color: "#fff", background: COLORS.rust, borderRadius: 999, padding: "1px 6px", fontWeight: 600 }}>LATE</span>
                     )}
                   </td>
                   <td style={{ padding: "5px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.ink }}>{r.item}</td>
@@ -1239,8 +1461,9 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
                   <td style={{ padding: "5px 10px", textAlign: "right", borderBottom: `1px solid ${COLORS.paperLine}` }}>{r.receiptWeek}</td>
                   <td style={{ padding: "4px 8px", textAlign: "right", borderBottom: `1px solid ${COLORS.paperLine}` }}>
                     <select value={entry.status} onChange={(e) => updateEntry(r.key, { status: e.target.value })} style={{
-                      fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, padding: "2px 4px",
+                      fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, padding: "3px 8px", fontWeight: 600,
                       background: statusMeta.bg, color: statusMeta.color, border: `1px solid ${statusMeta.color}`,
+                      borderRadius: 999, cursor: "pointer",
                     }}>
                       {STATUS_OPTIONS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                     </select>
@@ -1250,7 +1473,7 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
                       onChange={(e) => updateEntry(r.key, { poNumber: e.target.value })}
                       style={{
                         fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, width: 78, textAlign: "right",
-                        border: `1px solid ${COLORS.paperLine}`, padding: "2px 4px", background: "#fff", color: COLORS.ink,
+                        border: `1px solid ${COLORS.paperLine}`, padding: "2px 4px", background: "#fff", color: COLORS.ink, borderRadius: COLORS.radiusSm,
                       }} />
                   </td>
                 </tr>
@@ -1258,7 +1481,7 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
             })}
             {visibleRows.length === 0 && (
               <tr><td colSpan={7} style={{ padding: 14, textAlign: "center", color: COLORS.inkSoft }}>
-                {rows.length === 0 ? "No planned orders in this horizon." : "All planned orders are marked received."}
+                {scopedRows.length === 0 ? (onlySelected && selectedItem ? `No planned orders for ${selectedItem} in this horizon.` : "No planned orders in this horizon.") : "All planned orders are marked received."}
               </td></tr>
             )}
           </tbody>
@@ -1282,9 +1505,20 @@ export default function MRPDashboard() {
   const [historyWeeks, setHistoryWeeks] = useState(4);
   const [planOverrides, setPlanOverrides] = useState({});
   const [receiptOverrides, setReceiptOverrides] = useState({});
+  const [draftRefs, setDraftRefs] = useState({}); // เลขที่ PR/PO ฉบับร่างที่พิมพ์เอง กรณีระบบยังไม่ได้ดึงมาให้อัตโนมัติ
   const [selected, setSelected] = useState("BIKE-100");
+  const [isMobile, setIsMobile] = useState(() => typeof window !== "undefined" && window.innerWidth < 800);
+  const [mobileTab, setMobileTab] = useState("items"); // "items" | "details" — ใช้เฉพาะจอมือถือ
+  const [uploadsOpen, setUploadsOpen] = useState(() => !(typeof window !== "undefined" && window.innerWidth < 800));
+
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 800);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const [onlyWithOrders, setOnlyWithOrders] = useState(false);
   const [viewMode, setViewMode] = useState("assembly");
+  const [searchQuery, setSearchQuery] = useState("");
   const [forceOpen, setForceOpen] = useState(null);
   
   useEffect(() => {
@@ -1294,17 +1528,78 @@ export default function MRPDashboard() {
   const [loadedFlags, setLoadedFlags] = useState({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
   const [hydrated, setHydrated] = useState(false);
 const [hydrating, setHydrating] = useState(true);
-    // ---------------------------------------------------------
-    // >>>>> เริ่มวางโค้ดใหม่ตรงนี้ครับ (บรรทัด 1250) <<<<<
-    // ---------------------------------------------------------
-   // ---------------------------------------------------------
-  // ดึงข้อมูลจาก SharePoint (ดึงทุกไฟล์)
+
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [poOverrides, setPoOverrides] = useState({});
+
+  // ---------------------------------------------------------
+  // โหลดค่าที่เคยบันทึกไว้กลับมา (order status, ค่าที่ปรับเอง, horizon, PO pending ที่แก้เอง)
   // ---------------------------------------------------------
   useEffect(() => {
-    // 1. วาง URL ของ Power Automate ตรงนี้ (ใช้ URL เดิมที่เทสผ่านเมื่อกี้ได้เลย)
+    (async () => {
+      const [savedOrderStatus, savedPlanOverrides, savedReceiptOverrides, savedHorizon, savedHistoryWeeks, savedPoOverrides, savedDraftRefs] = await Promise.all([
+        storageGet("orderStatus"),
+        storageGet("planOverrides"),
+        storageGet("receiptOverrides"),
+        storageGet("horizon"),
+        storageGet("historyWeeks"),
+        storageGet("poOverrides"),
+        storageGet("draftRefs"),
+      ]);
+      if (savedOrderStatus) setOrderStatus(savedOrderStatus);
+      if (savedPlanOverrides) setPlanOverrides(savedPlanOverrides);
+      if (savedReceiptOverrides) setReceiptOverrides(savedReceiptOverrides);
+      if (savedHorizon !== null && savedHorizon !== undefined) setHorizon(savedHorizon);
+      if (savedHistoryWeeks !== null && savedHistoryWeeks !== undefined) setHistoryWeeks(savedHistoryWeeks);
+      if (savedPoOverrides) setPoOverrides(savedPoOverrides);
+      if (savedDraftRefs) setDraftRefs(savedDraftRefs);
+      setSettingsLoaded(true);
+    })();
+  }, []);
+
+  // บันทึกอัตโนมัติทุกครั้งที่มีการเปลี่ยนแปลง (รอให้โหลดค่าเก่าเสร็จก่อน กันเขียนทับด้วยค่าว่างตอนเปิดหน้า)
+  useEffect(() => { if (settingsLoaded) storageSet("orderStatus", orderStatus); }, [orderStatus, settingsLoaded]);
+  useEffect(() => { if (settingsLoaded) storageSet("planOverrides", planOverrides); }, [planOverrides, settingsLoaded]);
+  useEffect(() => { if (settingsLoaded) storageSet("receiptOverrides", receiptOverrides); }, [receiptOverrides, settingsLoaded]);
+  useEffect(() => { if (settingsLoaded) storageSet("horizon", horizon); }, [horizon, settingsLoaded]);
+  useEffect(() => { if (settingsLoaded) storageSet("historyWeeks", historyWeeks); }, [historyWeeks, settingsLoaded]);
+  useEffect(() => { if (settingsLoaded) storageSet("poOverrides", poOverrides); }, [poOverrides, settingsLoaded]);
+  useEffect(() => { if (settingsLoaded) storageSet("draftRefs", draftRefs); }, [draftRefs, settingsLoaded]);
+
+  // ผสานค่า PO pending ที่ผู้ใช้แก้เอง (poOverrides) เข้ากับข้อมูลต้นฉบับที่ดึงมาจาก SharePoint เสมอ
+  // ทำให้ต่อให้ดึงข้อมูลใหม่ (ตอนโหลดหน้า/รีเฟรช) ค่าที่เคยแก้ไว้ก็จะยังถูกทับกลับเข้าไปให้อัตโนมัติ
+  useEffect(() => {
+    setScheduledReceiptsPO(applyPoOverrides(scheduledReceiptsPOOriginal, poOverrides));
+  }, [scheduledReceiptsPOOriginal, poOverrides]);
+
+  const adjustDraftRef = (item, weekIndex, kind, rawValue) => {
+    const key = `${item}::${weekIndex}::${kind}`;
+    setDraftRefs((prev) => {
+      const next = { ...prev };
+      if (!rawValue || !rawValue.trim()) { delete next[key]; return next; }
+      next[key] = rawValue;
+      return next;
+    });
+  };
+
+  const clearSavedSettings = async () => {
+    await storageClearAll(["orderStatus", "planOverrides", "receiptOverrides", "horizon", "historyWeeks", "poOverrides", "draftRefs"]);
+    setOrderStatus({});
+    setPlanOverrides({});
+    setReceiptOverrides({});
+    setDraftRefs({});
+    setHorizon(12);
+    setHistoryWeeks(4);
+    setPoOverrides({});
+  };
+
+  // ---------------------------------------------------------
+  // ดึงข้อมูลจาก SharePoint (แบบต่อคิว ป้องกัน Server บล็อก)
+  // ---------------------------------------------------------
+  useEffect(() => {
     const PA_BASE_URL = "https://defaultb0a451413bd9434690304b8b30ca77.f2.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/22/workflows/98efa377cbb84f8f92a8cecf69d97cf9/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=GYjaw1ng23DOassgX6tsKKM2JEA88g_dSH7pun4kOw8";
 
-    const fetchAndParse = async (filename, stateSetter, flagKey) => {
+    const fetchAndParse = async (filename, stateSetters, flagKey) => {
       try {
         const response = await fetch(`${PA_BASE_URL}&filename=${filename}`);
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
@@ -1315,7 +1610,12 @@ const [hydrating, setHydrating] = useState(true);
           header: true,
           skipEmptyLines: true,
           complete: (res) => {
-            stateSetter(res.data);
+            // รองรับการนำข้อมูลไปใส่ State หลายๆ ตัวพร้อมกัน จากการดึงแค่รอบเดียว
+            if (Array.isArray(stateSetters)) {
+              stateSetters.forEach(setter => setter(res.data));
+            } else {
+              stateSetters(res.data);
+            }
             setLoadedFlags((f) => ({ ...f, [flagKey]: true }));
           }
         });
@@ -1324,23 +1624,32 @@ const [hydrating, setHydrating] = useState(true);
       }
     };
 
-    // 2. สั่งเรียกทุกไฟล์พร้อมกัน
-    // *ข้อควรระวัง: คำในเครื่องหมายคำพูด (เช่น "bom", "inventory") 
-    // ต้องสะกดให้ตรงกับชื่อไฟล์บน SharePoint เป๊ะๆ (ตัวพิมพ์เล็ก/ใหญ่มีผล)
-    
-    fetchAndParse("bom", setBom, "bom");
-    fetchAndParse("Onhand", setInventory, "inventory");
-    fetchAndParse("Demand Schedule", setDemand, "demand");
-    fetchAndParse("Actual Consumption", setActualConsumption, "actualConsumption");
-    fetchAndParse("Expired", setBatches, "batches");
-    
-    // สำหรับ PO ต้องโหลด 2 ที่ตามโค้ดเดิมของคุณครับ
-    fetchAndParse("Pending", setScheduledReceiptsPOOriginal, "poPending"); 
-    fetchAndParse("Pending", setScheduledReceiptsPO, "poPending");
-    
-    fetchAndParse("GIT", setScheduledReceiptsGIT, "git");
+    const loadAllData = async () => {
+      // 🔑 ใส่ await ข้างหน้า เพื่อบังคับให้โหลดเสร็จทีละไฟล์ ค่อยโหลดไฟล์ต่อไป
+      await fetchAndParse("bom", setBom, "bom");
+      await fetchAndParse("Onhand", setInventory, "inventory");
+      await fetchAndParse("Demand Schedule", setDemand, "demand");
+      await fetchAndParse("Actual Consumption", setActualConsumption, "actualConsumption");
+      await fetchAndParse("Expired", setBatches, "batches");
+      
+      // 🎯 สำหรับ PO Pending: ดึงแค่ "ครั้งเดียว" แล้วแบ่งข้อมูลให้ทั้ง State ปกติ และ Original
+      await fetchAndParse("Pending", [setScheduledReceiptsPOOriginal, setScheduledReceiptsPO], "poPending");
+      
+      await fetchAndParse("GIT", setScheduledReceiptsGIT, "git");
 
-  }, []); 
+      // โหลดครบทุกไฟล์แล้ว ค่อยปิดสถานะจอโหลด
+      setHydrating(false);
+      setHydrated(true);
+    };
+
+    loadAllData();
+
+  }, []);
+
+  const handleSelectItem = (item) => {
+    setSelected(item);
+    if (isMobile) setMobileTab("details");
+  };
 
   const handleFile = useCallback((key, setter) => (file) => {
     parseCSV(file, (rows) => {
@@ -1357,7 +1666,7 @@ const [hydrating, setHydrating] = useState(true);
     });
   }, []);
 
-  const { weeks, weekLabels, weekDates, records, order, childrenOf, warnings } = useMemo(
+  const { weeks, weekLabels, weekDates, weekMondayDates, records, order, childrenOf, warnings } = useMemo(
     () => runMRP({ bom, inventory, demand, poPending: scheduledReceiptsPO, git: scheduledReceiptsGIT, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides }),
     [bom, inventory, demand, scheduledReceiptsPO, scheduledReceiptsGIT, actualConsumption, batches, horizon, historyWeeks, planOverrides, receiptOverrides]
   );
@@ -1407,11 +1716,8 @@ const [hydrating, setHydrating] = useState(true);
   const adjustPOQty = (item, poNumber, rawValue) => {
     const n = Number(rawValue);
     if (!Number.isFinite(n) || n < 0) return;
-    setScheduledReceiptsPO((prev) => prev.map((r) => {
-      const matchesItem = r.item === item;
-      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono", "เลขที่po"], ["po", "ref", "doc"]);
-      return matchesItem && rPo === poNumber ? { ...r, quantity: n } : r;
-    }));
+    const key = `${item}::${poNumber}`;
+    setPoOverrides((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), quantity: n } }));
   };
 
   const poOriginalMap = useMemo(() => {
@@ -1430,30 +1736,166 @@ const [hydrating, setHydrating] = useState(true);
 
   const adjustPOWeek = (item, poNumber, rawValue) => {
     if (!String(rawValue).trim()) return;
-    setScheduledReceiptsPO((prev) => prev.map((r) => {
-      const matchesItem = r.item === item;
-      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono", "เลขที่po"], ["po", "ref", "doc"]);
-      return matchesItem && rPo === poNumber ? { ...r, week: rawValue } : r;
-    }));
+    const key = `${item}::${poNumber}`;
+    setPoOverrides((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), week: rawValue } }));
   };
   const resetPOWeek = (item, poNumber) => {
-    const orig = poOriginalMap[`${item}::${poNumber}`];
-    if (!orig) return;
-    setScheduledReceiptsPO((prev) => prev.map((r) => {
-      const matchesItem = r.item === item;
-      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono", "เลขที่po"], ["po", "ref", "doc"]);
-      return matchesItem && rPo === poNumber ? { ...r, week: orig.week } : r;
-    }));
+    const key = `${item}::${poNumber}`;
+    setPoOverrides((prev) => {
+      if (!prev[key] || prev[key].week === undefined) return prev;
+      const next = { ...prev };
+      const entry = { ...next[key] };
+      delete entry.week;
+      if (Object.keys(entry).length === 0) delete next[key]; else next[key] = entry;
+      return next;
+    });
   };
 
   const resetPOQty = (item, poNumber) => {
-    const orig = poOriginalQtyMap[`${item}::${poNumber}`];
-    if (orig === undefined) return;
-    setScheduledReceiptsPO((prev) => prev.map((r) => {
-      const matchesItem = r.item === item;
-      const rPo = getField(r, ["ponumber", "ponum", "ponbr", "po", "ponr", "pono", "เลขที่po"], ["po", "ref", "doc"]);
-      return matchesItem && rPo === poNumber ? { ...r, quantity: orig } : r;
-    }));
+    const key = `${item}::${poNumber}`;
+    setPoOverrides((prev) => {
+      if (!prev[key] || prev[key].quantity === undefined) return prev;
+      const next = { ...prev };
+      const entry = { ...next[key] };
+      delete entry.quantity;
+      if (Object.keys(entry).length === 0) delete next[key]; else next[key] = entry;
+      return next;
+    });
+  };
+
+  const exportPowerBI = () => {
+    const runDate = new Date().toISOString().slice(0, 10);
+
+    // 1) Weekly time series: stock / consumption / receiving ต่อ item ต่อสัปดาห์ (tidy format สำหรับ Power BI)
+    //    รวมข้อมูลที่ผู้ใช้กรอก/ปรับเองด้วย: override, draft PR/PO, order status
+    const weeklyRows = [];
+    order.forEach((item) => {
+      const rec = records[item];
+      weeks.forEach((w, i) => {
+        const releaseWeekLabel = weekLabels[i];
+        const statusEntry = orderStatus[`${item}::${releaseWeekLabel}`];
+        weeklyRows.push({
+          item: rec.item,
+          description: rec.description,
+          unit: rec.unit,
+          vendor: rec.vendor,
+          mold_family: rec.moldFamily || "",
+          level: rec.level,
+          is_history: i < historyWeeks ? "yes" : "no",
+          week_index: i,
+          week_label: weekLabels[i],
+          week_date: weekDates[i],
+          week_monday_date: weekMondayDates[i],
+          gross_requirement: rec.grossReq[i] ?? 0,
+          consumption_planned: rec.consumption[i] ?? 0,
+          actual_consumption: rec.actualConsumption[i] ?? 0,
+          consumption_variance: rec.consumptionVariance[i] ?? "",
+          po_pending_qty: rec.poPending[i] ?? 0,
+          git_qty: rec.git[i] ?? 0,
+          expired_qty: rec.expiredByWeek[i] ?? 0,
+          projected_on_hand: rec.projOnHand[i] ?? "",
+          safety_stock_target: rec.safety,
+          safety_stock_remaining: rec.projOnHand[i] !== null && rec.projOnHand[i] !== undefined ? rec.projOnHand[i] - rec.safety : "",
+          net_requirement: rec.netReq[i] ?? "",
+          planned_order_receipt: rec.plannedReceipt[i] ?? "",
+          planned_order_receipt_overridden: (receiptOverrides[`${item}::${i}`] !== undefined) ? "yes" : "no",
+          planned_order_release: rec.plannedRelease[i] ?? "",
+          planned_order_release_overridden: (planOverrides[`${item}::${i}`] !== undefined) ? "yes" : "no",
+          draft_pr_number: draftRefs[`${item}::${i}::prel`] || "",
+          draft_po_number: draftRefs[`${item}::${i}::por`] || "",
+          order_status: statusEntry ? statusEntry.status : "",
+          order_status_po_number: statusEntry ? (statusEntry.poNumber || "") : "",
+          lead_time_weeks: rec.leadTime,
+          lot_size: rec.lotSize,
+          unit_price: rec.unitPrice,
+        });
+      });
+    });
+    downloadCSV(`powerbi_weekly_${runDate}.csv`, weeklyRows);
+
+    // 2) Stock snapshot: สต็อกปัจจุบันต่อ item ณ วันที่รัน
+    const stockRows = order.map((item) => {
+      const rec = records[item];
+      return {
+        item: rec.item,
+        description: rec.description,
+        unit: rec.unit,
+        vendor: rec.vendor,
+        mold_family: rec.moldFamily || "",
+        on_hand_usable: rec.usableOnHand,
+        on_hand_total: rec.onHand,
+        expired_qty: rec.expiredQty,
+        safety_stock_base: rec.baseSafety,
+        safety_factor: rec.safetyFactor,
+        safety_stock_effective: rec.safety,
+        lead_time_weeks: rec.leadTime,
+        lot_size: rec.lotSize,
+        unit_price: rec.unitPrice,
+        on_hand_usable_value: rec.usableValue,
+        expired_value: rec.expiredValue,
+        batch_count: rec.batches.length,
+        nearest_expiry_date: rec.expiryDate || "",
+        expired: rec.expired ? "yes" : "no",
+        expiring_soon: rec.expiringSoon ? "yes" : "no",
+        run_date: runDate,
+      };
+    });
+    downloadCSV(`powerbi_stock_${runDate}.csv`, stockRows);
+
+    // 3) PO outstanding: รายการ PO pending ทุกใบ (รวมที่อยู่นอกช่วง horizon ด้วย) + ค่าที่แก้เอง (poOverrides)
+    const poRows = [];
+    order.forEach((item) => {
+      const rec = records[item];
+      (rec.poPendingDetails || []).forEach((p) => {
+        const overrideKey = `${item}::${p.poNumber}`;
+        const ov = poOverrides[overrideKey];
+        poRows.push({
+          item: rec.item,
+          description: rec.description,
+          unit: rec.unit,
+          po_number: p.poNumber,
+          vendor: p.vendor,
+          quantity: p.quantity,
+          due_week: p.weekLabel,
+          due_monday_date: p.mondayDate,
+          within_current_horizon: p.outOfHorizon ? "no" : "yes",
+          qty_manually_edited: ov && ov.quantity !== undefined ? "yes" : "no",
+          due_week_manually_edited: ov && ov.week !== undefined ? "yes" : "no",
+          run_date: runDate,
+        });
+      });
+    });
+    downloadCSV(`powerbi_po_outstanding_${runDate}.csv`, poRows);
+
+    // 4) Order Planning: สถานะที่ผู้ใช้ update เอง (Pending/Released/PO placed/Received) + เลข PO ที่กรอก
+    const orderPlanningRows = [];
+    order.forEach((item) => {
+      const rec = records[item];
+      rec.plannedRelease.forEach((v, i) => {
+        if (v > 0) {
+          const releaseWeekLabel = weekLabels[i];
+          const receiptIdx = Math.min(i + rec.leadTime, weekLabels.length - 1);
+          const statusEntry = orderStatus[`${item}::${releaseWeekLabel}`] || { status: "pending", poNumber: "" };
+          orderPlanningRows.push({
+            item: rec.item,
+            description: rec.description,
+            unit: rec.unit,
+            vendor: rec.vendor,
+            mold_family: rec.moldFamily || "",
+            release_week: releaseWeekLabel,
+            due_week: weekLabels[receiptIdx],
+            quantity: Math.round(v),
+            lead_time_weeks: rec.leadTime,
+            past_due: rec.pastDue[i] ? "yes" : "no",
+            status: statusEntry.status,
+            po_number: statusEntry.poNumber || "",
+            draft_pr_number: draftRefs[`${item}::${i}::prel`] || "",
+            run_date: runDate,
+          });
+        }
+      });
+    });
+    downloadCSV(`powerbi_order_planning_${runDate}.csv`, orderPlanningRows);
   };
 
   const poPendingHeaderWarning = useMemo(() => {
@@ -1485,7 +1927,37 @@ const [hydrating, setHydrating] = useState(true);
     return vendors.map((v) => ({ vendor: v, items: map[v].sort() }));
   }, [order, records]);
 
+  // กลุ่ม item ตาม mold family — ใช้ตอนสั่งซื้อจะได้ซื้อทั้งเซ็ตพร้อมกัน (แสดงเฉพาะ item ที่ระบุ mold_family ไว้)
+  const moldFamilyMap = useMemo(() => {
+    const map = {};
+    order.forEach((it) => {
+      const mf = records[it].moldFamily;
+      if (!mf) return;
+      map[mf] = map[mf] || [];
+      map[mf].push(it);
+    });
+    Object.values(map).forEach((list) => list.sort());
+    return map;
+  }, [order, records]);
+
+  const moldFamilyGroups = useMemo(() => {
+    return Object.keys(moldFamilyMap).sort().map((f) => ({ vendor: f, items: moldFamilyMap[f] }));
+  }, [moldFamilyMap]);
+
   const topItems = useMemo(() => order.filter((it) => !records[it].hasParents), [order, records]);
+
+  const searchResults = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return null;
+    return order.filter((it) => {
+      const rec = records[it];
+      return (
+        it.toLowerCase().includes(q) ||
+        (rec.description || "").toLowerCase().includes(q) ||
+        (rec.vendor || "").toLowerCase().includes(q)
+      );
+    });
+  }, [searchQuery, order, records]);
 
   const usedInMap = useMemo(() => {
     const map = {};
@@ -1541,18 +2013,28 @@ const [hydrating, setHydrating] = useState(true);
   const selectedRec = records[selected];
 
   return (
-    <div style={{ background: COLORS.paper, minHeight: "100%", padding: 18, fontFamily: "Inter, sans-serif" }}>
+    <div style={{ background: COLORS.paper, minHeight: "100%", padding: isMobile ? 10 : 18, fontFamily: "Inter, sans-serif" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
         * { box-sizing: border-box; }
+        body, input, select, button { -webkit-font-smoothing: antialiased; }
+        input, select, button { transition: box-shadow 0.15s ease, border-color 0.15s ease, background 0.15s ease, transform 0.1s ease; }
+        input:focus-visible, select:focus-visible, button:focus-visible {
+          outline: none; box-shadow: 0 0 0 3px rgba(59,94,219,0.25); border-color: ${COLORS.steel} !important;
+        }
+        button:not(:disabled):hover { filter: brightness(0.97); }
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: ${COLORS.paperLine}; border-radius: 999px; border: 2px solid ${COLORS.paper}; }
+        ::-webkit-scrollbar-thumb:hover { background: #C7CCD8; }
       `}</style>
 
       {/* title block header */}
       <div style={{
-        display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", border: `1px solid ${COLORS.ink}`,
-        background: COLORS.card, marginBottom: 16,
+        display: "grid", gridTemplateColumns: isMobile ? "1fr" : "2fr 1fr 1fr 1fr", border: `1px solid ${COLORS.paperLine}`,
+        background: COLORS.card, marginBottom: 16, borderRadius: COLORS.radius, boxShadow: COLORS.shadowLg, overflow: "hidden",
       }}>
-        <div style={{ padding: "10px 14px", borderRight: `1px solid ${COLORS.ink}` }}>
+        <div style={{ padding: "10px 14px", borderRight: isMobile ? "none" : `1px solid ${COLORS.paperLine}`, borderBottom: isMobile ? `1px solid ${COLORS.paperLine}` : "none" }}>
           <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, color: COLORS.ink, letterSpacing: "0.01em" }}>
             MATERIAL REQUIREMENTS PLAN
           </div>
@@ -1560,10 +2042,10 @@ const [hydrating, setHydrating] = useState(true);
             time-phased planning record · BOM explosion · lead-time offset
           </div>
         </div>
-        <div style={{ padding: "10px 14px", borderRight: `1px solid ${COLORS.ink}` }}>
+        <div style={{ padding: "10px 14px", borderRight: isMobile ? "none" : `1px solid ${COLORS.paperLine}`, borderBottom: isMobile ? `1px solid ${COLORS.paperLine}` : "none" }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft, letterSpacing: "0.06em" }}>HORIZON</div>
-          <input type="number" min={4} max={26} value={horizon}
-            onChange={(e) => setHorizon(Math.max(4, Math.min(26, toNum(e.target.value, 12))))}
+          <input type="number" min={4} max={52} value={horizon}
+            onChange={(e) => setHorizon(Math.max(4, Math.min(52, toNum(e.target.value, 12))))}
             style={{
               fontFamily: "'Space Grotesk', sans-serif", fontSize: 18, fontWeight: 700, color: COLORS.ink,
               border: "none", background: "transparent", width: "60px", outline: "none",
@@ -1574,7 +2056,7 @@ const [hydrating, setHydrating] = useState(true);
               onChange={(e) => setHistoryWeeks(Math.max(0, Math.min(12, toNum(e.target.value, 4))))}
               style={{
                 fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 700, color: COLORS.ink,
-                border: `1px solid ${COLORS.paperLine}`, background: "transparent", width: "34px", outline: "none", padding: "1px 3px",
+                border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radiusSm, background: "transparent", width: "34px", outline: "none", padding: "1px 3px",
               }} />
             <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft }}>wks back</span>
           </div>
@@ -1582,35 +2064,48 @@ const [hydrating, setHydrating] = useState(true);
             today: {weekLabels[historyWeeks]}
           </div>
         </div>
-        <div style={{ padding: "10px 14px", borderRight: `1px solid ${COLORS.ink}` }}>
+        <div style={{ padding: "10px 14px", borderRight: isMobile ? "none" : `1px solid ${COLORS.paperLine}`, borderBottom: isMobile ? `1px solid ${COLORS.paperLine}` : "none" }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft, letterSpacing: "0.06em" }}>ITEMS</div>
           <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 18, fontWeight: 700, color: COLORS.ink }}>{kpis.itemCount}</div>
         </div>
-        <div style={{ padding: "10px 14px" }}>
+  <div style={{ padding: "10px 14px" }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft, letterSpacing: "0.06em" }}>RUN DATE</div>
           <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 700, color: COLORS.ink }}>
             {new Date().toISOString().slice(0, 10)}
           </div>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft, marginTop: 2 }}>
-            {hydrating ? "restoring last session\u2026" : (
-              <span>
-                data auto-saved{" "}
-                <button onClick={clearSavedData} style={{
-                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.rust,
-                  background: "transparent", border: "none", padding: 0, cursor: "pointer", textDecoration: "underline",
-                }}>clear</button>
-              </span>
-            )}
+            {hydrating ? "loading data from SharePoint\u2026" : "data loaded successfully"}
           </div>
+          <button onClick={() => { if (window.confirm("ล้างค่า order status / ค่าที่ปรับเอง / horizon ที่บันทึกไว้ทั้งหมด?")) clearSavedSettings(); }} style={{
+            display: "flex", alignItems: "center", gap: 4, cursor: "pointer", marginTop: 4,
+            fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft,
+            border: `1px solid ${COLORS.paperLine}`, background: "transparent", padding: "2px 6px", borderRadius: COLORS.radiusSm,
+          }}>clear saved settings</button>
+          <button onClick={exportPowerBI} style={{
+            display: "flex", alignItems: "center", gap: 4, cursor: "pointer", marginTop: 4,
+            fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, fontWeight: 600, color: "#fff",
+            border: `1px solid ${COLORS.steel}`, background: COLORS.steel, padding: "3px 8px", borderRadius: COLORS.radiusSm,
+          }}><Download size={11} /> export for Power BI</button>
         </div>
       </div>
 
       {/* uploads */}
-      <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+      {isMobile && (
+        <button onClick={() => setUploadsOpen((o) => !o)} style={{
+          display: "flex", alignItems: "center", gap: 6, cursor: "pointer", marginBottom: 10,
+          fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.steel, fontWeight: 600,
+          border: `1px solid ${COLORS.steel}`, background: COLORS.card, borderRadius: COLORS.radiusSm,
+          padding: "8px 12px", width: "100%", justifyContent: "space-between",
+        }}>
+          <span>{"\u{1F4C1}"} Upload / data sources</span>
+          {uploadsOpen ? <ChevronsUp size={13} /> : <ChevronsDown size={13} />}
+        </button>
+      )}
+      <div style={{ display: (!isMobile || uploadsOpen) ? "flex" : "none", gap: 10, marginBottom: 16, flexWrap: "wrap", flexDirection: isMobile ? "column" : "row" }}>
         <UploadSlot label="Bill of Materials" hint="parent_item, component_item, qty_per"
           onFile={handleFile("bom", setBom)} loaded={loadedFlags.bom} count={bom.length}
           onSample={() => { setBom(SAMPLE_BOM); setLoadedFlags((f) => ({ ...f, bom: false })); }} />
-        <UploadSlot label="Inventory Master" hint="item, on_hand, lead_time_weeks, lot_size, safety_stock, safety_factor, vendor, unit_price, expiry_date"
+        <UploadSlot label="Inventory Master" hint="item, on_hand, lead_time_weeks, lot_size, safety_stock, safety_factor, vendor, unit_price, expiry_date, mold_family (optional)"
           onFile={handleFile("inventory", setInventory)} loaded={loadedFlags.inventory} count={inventory.length}
           onSample={() => { setInventory(SAMPLE_INVENTORY); setLoadedFlags((f) => ({ ...f, inventory: false })); }} />
         <UploadSlot label="Demand Schedule" hint="item, week (e.g. 26CW25), quantity"
@@ -1639,7 +2134,7 @@ const [hydrating, setHydrating] = useState(true);
 
       {poPendingHeaderWarning && (
         <div style={{
-          border: `1px solid ${COLORS.amber}`, background: "#F3DDBC", color: "#5C4419",
+          border: `1px solid ${COLORS.amber}`, background: "#FEF3C7", color: "#92400E",
           padding: "6px 12px", marginBottom: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
         }}>
           Couldn't find a PO number column in your PO Pending file — columns detected: {poPendingHeaderWarning.join(", ")}.
@@ -1651,7 +2146,7 @@ const [hydrating, setHydrating] = useState(true);
       {warnings && (warnings.demandWithoutBOM.length > 0 || warnings.missingInventory.length > 0) && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
           {warnings.demandWithoutBOM.length > 0 && (
-            <div style={{ background: '#F3DDBC', border: `1px solid ${COLORS.amber}`, padding: '8px 12px', color: '#5C4419', fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ background: '#FEF3C7', border: `1px solid ${COLORS.amber}`, padding: '8px 12px', color: '#92400E', fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
               <AlertTriangle size={14} color={COLORS.amber} style={{ minWidth: 14 }} />
               <span>
                 <strong>ตรวจสอบข้อมูล:</strong> พบรายการที่มีแผนผลิต (Demand) แต่ไม่มีโครงสร้าง BOM ในระบบ: <b>{warnings.demandWithoutBOM.join(", ")}</b> <i>(หากเป็นสินค้าซื้อมาขายไป หรืออะไหล่ สามารถข้ามได้)</i>
@@ -1659,7 +2154,7 @@ const [hydrating, setHydrating] = useState(true);
             </div>
           )}
           {warnings.missingInventory.length > 0 && (
-            <div style={{ background: '#F6D9D3', border: `1px solid ${COLORS.rust}`, padding: '8px 12px', color: '#6A2B1D', fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ background: '#FEE2E2', border: `1px solid ${COLORS.rust}`, padding: '8px 12px', color: '#991B1B', fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
               <CircleAlert size={14} color={COLORS.rust} style={{ minWidth: 14 }} />
               <span>
                 <strong>ข้อมูล Master ขาดหาย:</strong> พบรายการเหล่านี้อยู่ในโครงสร้าง BOM หรือ Demand แต่ไม่มีรายชื่ออยู่ใน Inventory Master: <b>{warnings.missingInventory.join(", ")}</b>
@@ -1670,23 +2165,44 @@ const [hydrating, setHydrating] = useState(true);
       )}
 
       {/* KPIs */}
-      <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-        <KPI label="Past due releases" value={kpis.pastDue} tone="rust" icon={CircleAlert} />
-        <KPI label="Planned orders in horizon" value={kpis.ordersNeeded} tone="steel" icon={ClipboardList} />
-        <KPI label="Items below safety stock (wk 1)" value={kpis.belowSafety} tone="amber" icon={AlertTriangle} />
-        <KPI label="Items in structure" value={kpis.itemCount} tone="moss" icon={Gauge} />
-        <KPI label="PO pending" value={scheduledReceiptsPO.length} tone="amber" icon={ClipboardList} />
-        <KPI label="Goods in transit" value={scheduledReceiptsGIT.length} tone="moss" icon={ClipboardList} />
-        <KPI label="Expired stock" value={kpis.expiredCount} tone="rust" icon={CalendarX} />
-        <KPI label="Expiring within 4 wks" value={kpis.expiringSoonCount} tone="amber" icon={CalendarX} />
-        <KPI label="Consumption variance" value={kpis.varianceCount} tone="steel" icon={Scale} />
-        <KPI label="Usable inventory value" value={kpis.totalValue.toLocaleString(undefined, { maximumFractionDigits: 0 })} tone="moss" icon={Gauge} />
-        <KPI label="Value at risk (expired)" value={kpis.expiredValue.toLocaleString(undefined, { maximumFractionDigits: 0 })} tone="rust" icon={CalendarX} />
+      <div style={isMobile ? {
+        display: "flex", gap: 10, marginBottom: 16, overflowX: "auto", paddingBottom: 4,
+        scrollSnapType: "x mandatory", WebkitOverflowScrolling: "touch",
+      } : { display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        <KPI label="Past due releases" value={kpis.pastDue} tone="rust" icon={CircleAlert} mobile={isMobile} />
+        <KPI label="Planned orders in horizon" value={kpis.ordersNeeded} tone="steel" icon={ClipboardList} mobile={isMobile} />
+        <KPI label="Items below safety stock (wk 1)" value={kpis.belowSafety} tone="amber" icon={AlertTriangle} mobile={isMobile} />
+        <KPI label="Items in structure" value={kpis.itemCount} tone="moss" icon={Gauge} mobile={isMobile} />
+        <KPI label="PO pending" value={scheduledReceiptsPO.length} tone="amber" icon={ClipboardList} mobile={isMobile} />
+        <KPI label="Goods in transit" value={scheduledReceiptsGIT.length} tone="moss" icon={ClipboardList} mobile={isMobile} />
+        <KPI label="Expired stock" value={kpis.expiredCount} tone="rust" icon={CalendarX} mobile={isMobile} />
+        <KPI label="Expiring within 4 wks" value={kpis.expiringSoonCount} tone="amber" icon={CalendarX} mobile={isMobile} />
+        <KPI label="Consumption variance" value={kpis.varianceCount} tone="steel" icon={Scale} mobile={isMobile} />
+        <KPI label="Usable inventory value" value={kpis.totalValue.toLocaleString(undefined, { maximumFractionDigits: 0 })} tone="moss" icon={Gauge} mobile={isMobile} />
+        <KPI label="Value at risk (expired)" value={kpis.expiredValue.toLocaleString(undefined, { maximumFractionDigits: 0 })} tone="rust" icon={CalendarX} mobile={isMobile} />
       </div>
 
       {/* main */}
-      <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 14, alignItems: "start" }}>
-        <div style={{ border: `1px solid ${COLORS.paperLine}`, background: COLORS.card }}>
+      {isMobile && (
+        <div style={{
+          display: "flex", gap: 6, marginBottom: 12, background: COLORS.card,
+          border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radius, boxShadow: COLORS.shadow, padding: 4,
+        }}>
+          {[["items", "\u{1F4CB} Items"], ["details", "\u{1F4CA} Details"]].map(([tab, label]) => (
+            <button key={tab} onClick={() => setMobileTab(tab)} style={{
+              flex: 1, padding: "8px 6px", cursor: "pointer", border: "none", borderRadius: COLORS.radiusSm,
+              background: mobileTab === tab ? COLORS.steel : "transparent",
+              color: mobileTab === tab ? "#fff" : COLORS.inkSoft,
+              fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 600,
+            }}>{label}</button>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "260px 1fr", gap: 14, alignItems: "start" }}>
+        <div style={{
+          display: isMobile && mobileTab !== "items" ? "none" : "block",
+          border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radius, boxShadow: COLORS.shadowLg, background: COLORS.card, overflow: "hidden",
+        }}>
           <div style={{
             display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, padding: "8px 12px",
             borderBottom: `1px solid ${COLORS.paperLine}`, flexWrap: "wrap", rowGap: 6,
@@ -1695,7 +2211,7 @@ const [hydrating, setHydrating] = useState(true);
               display: "flex", alignItems: "center", gap: 6, fontFamily: "'Space Grotesk', sans-serif",
               fontSize: 12, fontWeight: 700, letterSpacing: "0.04em", color: COLORS.ink, textTransform: "uppercase",
             }}>
-              <PackageSearch size={14} color={COLORS.steel} /> {viewMode === "assembly" ? "Item Structure" : viewMode === "material" ? "Where-Used" : "By Vendor"}
+              <PackageSearch size={14} color={COLORS.steel} /> {viewMode === "assembly" ? "Item Structure" : viewMode === "material" ? "Where-Used" : viewMode === "moldFamily" ? "By Mold Family" : "By Vendor"}
             </span>
             <label style={{
               display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
@@ -1707,36 +2223,98 @@ const [hydrating, setHydrating] = useState(true);
             </label>
           </div>
           <div style={{ display: "flex", borderBottom: `1px solid ${COLORS.paperLine}` }}>
-            {[["assembly", "Finished good \u2192 parts"], ["material", "Raw material \u2192 where-used"], ["vendor", "By vendor"]].map(([mode, label]) => (
+            {[["assembly", "Finished good \u2192 parts"], ["material", "Raw material \u2192 where-used"], ["vendor", "By vendor"], ...(moldFamilyGroups.length > 0 ? [["moldFamily", "By mold family"]] : [])].map(([mode, label]) => (
               <button key={mode} onClick={() => setViewMode(mode)} style={{
                 flex: 1, padding: "6px 6px", cursor: "pointer", border: "none",
                 background: viewMode === mode ? COLORS.steel : "transparent",
-                color: viewMode === mode ? "#F4F4EE" : COLORS.inkSoft,
+                color: viewMode === mode ? "#FFFFFF" : COLORS.inkSoft,
                 fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5,
               }}>{label}</button>
             ))}
           </div>
-          <div style={{ display: "flex", gap: 6, padding: "6px 12px", borderBottom: `1px solid ${COLORS.paperLine}` }}>
-            <button onClick={() => setForceOpen(true)} style={{
-              display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
-              fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.steel,
-              border: `1px solid ${COLORS.steel}`, background: "transparent", padding: "3px 8px",
-            }}><ChevronsDown size={11} /> expand all</button>
-            <button onClick={() => setForceOpen(false)} style={{
-              display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
-              fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.inkSoft,
-              border: `1px solid ${COLORS.paperLine}`, background: "transparent", padding: "3px 8px",
-            }}><ChevronsUp size={11} /> collapse all</button>
+          <div style={{ padding: "8px 12px", borderBottom: `1px solid ${COLORS.paperLine}` }}>
+            <div style={{ position: "relative" }}>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="ค้นหา item / raw material / vendor..."
+                style={{
+                  width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5,
+                  border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radiusSm,
+                  padding: "6px 28px 6px 10px", color: COLORS.ink, background: COLORS.paper,
+                }}
+              />
+              {searchQuery && (
+                <button onClick={() => setSearchQuery("")} title="ล้างการค้นหา" style={{
+                  position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+                  border: "none", background: "transparent", cursor: "pointer", color: COLORS.inkSoft,
+                  fontSize: 14, lineHeight: 1, padding: 2,
+                }}>&#10005;</button>
+              )}
+            </div>
           </div>
+          {!searchResults && (
+            <div style={{ display: "flex", gap: 6, padding: "6px 12px", borderBottom: `1px solid ${COLORS.paperLine}` }}>
+              <button onClick={() => setForceOpen(true)} style={{
+                display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
+                fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.steel,
+                border: `1px solid ${COLORS.steel}`, background: "transparent", padding: "3px 8px", borderRadius: COLORS.radiusSm,
+              }}><ChevronsDown size={11} /> expand all</button>
+              <button onClick={() => setForceOpen(false)} style={{
+                display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
+                fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.inkSoft,
+                border: `1px solid ${COLORS.paperLine}`, background: "transparent", padding: "3px 8px", borderRadius: COLORS.radiusSm,
+              }}><ChevronsUp size={11} /> collapse all</button>
+            </div>
+          )}
           <div style={{ padding: "6px 2px", maxHeight: 480, overflowY: "auto" }}>
-            {viewMode === "vendor" ? (
-              <VendorGroupTree groups={vendorGroups} records={records} selected={selected} onSelect={setSelected}
+            {searchResults ? (
+              <>
+                <div style={{ padding: "6px 10px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft }}>
+                  {searchResults.length} result{searchResults.length === 1 ? "" : "s"}
+                </div>
+                {searchResults.map((it) => {
+                  const rec = records[it];
+                  const isSelected = selected === it;
+                  const critical = rec.pastDue.some(Boolean);
+                  const shortage = rec.plannedRelease.some((v) => v > 0);
+                  return (
+                    <div key={it} onClick={() => handleSelectItem(it)} title={`${rec.description} (${rec.unit})`} style={{
+                      display: "flex", flexDirection: "column", cursor: "pointer",
+                      paddingLeft: 12, paddingRight: 6, paddingTop: 5, paddingBottom: 5,
+                      background: isSelected ? COLORS.steel : "transparent",
+                      color: isSelected ? "#FFFFFF" : COLORS.ink,
+                      borderLeft: isSelected ? `3px solid ${COLORS.amber}` : "3px solid transparent",
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{it}</span>
+                        {critical && <CircleAlert size={12} color={isSelected ? "#FEE2E2" : COLORS.rust} />}
+                        {!critical && shortage && <AlertTriangle size={11} color={isSelected ? "#FEF3C7" : COLORS.amber} />}
+                      </div>
+                      <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, paddingLeft: 0, color: isSelected ? "#E4E7EC" : COLORS.inkSoft, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {rec.description} {"\u00b7"} {rec.unit}{rec.vendor ? ` \u00b7 ${rec.vendor}` : ""}
+                      </div>
+                    </div>
+                  );
+                })}
+                {searchResults.length === 0 && (
+                  <div style={{ padding: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.inkSoft, textAlign: "center" }}>
+                    ไม่พบ item / raw material / vendor ที่ตรงกับ "{searchQuery}"
+                  </div>
+                )}
+              </>
+            ) : viewMode === "vendor" ? (
+              <VendorGroupTree groups={vendorGroups} records={records} selected={selected} onSelect={handleSelectItem}
+                onlyWithOrders={onlyWithOrders} forceOpen={forceOpen} clearForce={() => setForceOpen(null)} />
+            ) : viewMode === "moldFamily" ? (
+              <VendorGroupTree groups={moldFamilyGroups} records={records} selected={selected} onSelect={handleSelectItem}
                 onlyWithOrders={onlyWithOrders} forceOpen={forceOpen} clearForce={() => setForceOpen(null)} />
             ) : (
               <>
                 {visibleTopItems.map((it) => (
                   <TreeRow key={it} item={it} records={records} childrenOf={activeChildMap}
-                    selected={selected} onSelect={setSelected} depth={0}
+                    selected={selected} onSelect={handleSelectItem} depth={0}
                     onlyWithOrders={onlyWithOrders} subtreeOrderMap={activeOrderMap}
                     forceOpen={forceOpen} clearForce={() => setForceOpen(null)} />
                 ))}
@@ -1750,14 +2328,16 @@ const [hydrating, setHydrating] = useState(true);
           </div>
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: isMobile && mobileTab !== "details" ? "none" : "flex", flexDirection: "column", gap: 14 }}>
           <RecordGrid rec={selectedRec} weeks={weeks} weekLabels={weekLabels} weekDates={weekDates} historyWeeks={historyWeeks}
             onAdjustPlan={adjustPlan} onResetPlanOverride={resetPlanOverride} 
             onAdjustReceipt={adjustReceipt} onResetReceiptOverride={resetReceiptOverride}
             onAdjustPOQty={adjustPOQty} poOriginalQtyMap={poOriginalQtyMap} onResetPOQty={resetPOQty}
             onAdjustPOWeek={adjustPOWeek} onResetPOWeek={resetPOWeek} poOriginalMap={poOriginalMap} 
-            planOverrides={planOverrides} receiptOverrides={receiptOverrides} />
-          <PlannedOrders records={records} weeks={weeks} weekLabels={weekLabels} orderStatus={orderStatus} setOrderStatus={setOrderStatus} />
+            planOverrides={planOverrides} receiptOverrides={receiptOverrides} isMobile={isMobile}
+            draftRefs={draftRefs} onAdjustDraftRef={adjustDraftRef}
+            moldFamilyMembers={selectedRec && selectedRec.moldFamily ? (moldFamilyMap[selectedRec.moldFamily] || []).filter((it) => it !== selected) : []} />
+          <PlannedOrders records={records} weeks={weeks} weekLabels={weekLabels} orderStatus={orderStatus} setOrderStatus={setOrderStatus} selectedItem={selected} />
         </div>
       </div>
 
