@@ -127,6 +127,17 @@ function applyPoOverrides(originalRows, overrides) {
 }
 
 // ---------- ISO week helpers ----------
+// นับเป็น "project" ก็ต่อเมื่อรหัส item ขึ้นต้นด้วยตัวอักษร (เช่น G8X, RS3)
+// ถ้าขึ้นต้นด้วยตัวเลข (เช่น 140, 240) ถือเป็น raw material ไม่ใช่ project
+function isProjectCode(code) {
+  return /^[A-Za-z]/.test(String(code || ""));
+}
+// เดาว่า vendor เป็นต่างประเทศ (oversea) หรือไม่ — ระบบยังไม่มีฟิลด์ประเทศ vendor ตรงๆ
+// ใช้ heuristic: ถ้าชื่อ vendor ไม่มีตัวอักษรไทยเลย ถือว่าเป็น vendor ต่างประเทศ
+function isOverseasVendor(vendor) {
+  if (!vendor || !String(vendor).trim()) return false; // ไม่มีชื่อ vendor เลย ไม่แน่ใจ ปลอดภัยไว้ก่อนว่าไม่ใช่ oversea
+  return !/[\u0E00-\u0E7F]/.test(vendor);
+}
 // รองรับวันที่หลายรูปแบบ (ISO YYYY-MM-DD และแบบวัน-เดือน-ปี เช่น DD-MM-YY / DD-MM-YYYY / DD/MM/YYYY)
 function parseFlexibleDate(dateStr) {
   const s = String(dateStr || "").trim();
@@ -209,6 +220,8 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
       description: extract(r, "description", ["description", "desc", "name", "ชื่อ"], ["desc", "ชื่อ"]),
       unit: extract(r, "unit", ["unit", "uom", "measure", "หน่วย"], ["unit", "uom"]),
       vendor: extract(r, "vendor", ["vendor", "supplier", "ผู้ขาย"], ["vendor", "sup"]),
+      country: extract(r, "country", ["country", "vendorcountry", "origincountry", "ประเทศ"], ["country", "ประเทศ"]),
+      is_overseas: extract(r, "is_overseas", ["isoverseas", "overseas", "oversea", "ตปท", "ต่างประเทศ"], ["oversea", "ต่างประเทศ"]),
       moldFamily: extract(r, "mold_family", ["moldfamily", "moldset", "mold", "familyname", "familygroup"], ["mold", "family"]),
       unit_price: toNum(extract(r, "unit_price", ["unitprice", "price", "cost", "ราคา"], ["price"])),
       on_hand: toNum(extract(r, "on_hand", ["onhand", "stock", "inventory", "คงคลัง"], ["hand", "stock"])),
@@ -309,6 +322,30 @@ function runMRP({ bom, inventory, demand, poPending, git, actualConsumption, bat
     }
   });
 
+  // เติม demand ช่วงอนาคตให้อัตโนมัติ (forecast) เฉพาะ item ระดับบนสุด (ไม่มี parent ใน BOM) ที่ Demand Schedule
+  // ยังไม่มีข้อมูลในสัปดาห์นั้น — ใช้ค่าเฉลี่ยจาก demand ในอดีต (history weeks) เป็นฐานพยากรณ์
+  // ไม่ทับข้อมูลจริงที่มีอยู่แล้ว และไม่ทำกับ raw material โดยตรง (ค่าพยากรณ์จะไหลลงไปหา raw material
+  // ผ่านการระเบิด BOM ตามปกติอยู่แล้วตอน planned release ของ FG ถูกคำนวณ)
+  const confirmedDemand = {};
+  order.forEach((it) => (confirmedDemand[it] = [...(grossReq[it] || new Array(totalCols).fill(0))])); // snapshot ก่อนเติม forecast — คือยอดจริงล้วนๆ
+  const forecastFlag = {};
+  order.forEach((it) => (forecastFlag[it] = new Array(totalCols).fill(false)));
+  order.forEach((item) => {
+    if (parentsOf[item] && parentsOf[item].length > 0) return; // เฉพาะ top-level (FG) เท่านั้น
+    const gr = grossReq[item];
+    if (!gr) return;
+    let histTotal = 0;
+    for (let i = 0; i < HW; i++) histTotal += gr[i] || 0;
+    const avgDemand = HW > 0 ? histTotal / HW : 0;
+    if (avgDemand <= 0) return; // ไม่มี demand ในอดีตให้พยากรณ์ ปล่อยเป็น 0 เหมือนเดิม
+    for (let i = HW; i < totalCols; i++) {
+      if (!gr[i]) {
+        gr[i] = avgDemand;
+        forecastFlag[item][i] = true;
+      }
+    }
+  });
+
   const schedReceiptByItem = {};
   const poPendingByItem = {};
   const gitByItem = {};
@@ -323,25 +360,27 @@ const poDetailsByItem = {};
     let rawItem = extract(r, "item", ["item", "part", "material", "รหัส"], ["item"]);
     let rawWeek = extract(r, "week", ["week", "wk", "cw", "สัปดาห์"], ["week"]);
     let rawQty = extract(r, "quantity", ["quantity", "qty", "amount", "จำนวน"], ["qty", "quant"]);
-    if (!rawItem || rawWeek === undefined) return;
+    if (!rawItem) return; // ต้องมี item code อย่างน้อย ถึงจะรู้ว่าเป็นของ item ไหน
     rawItem = String(rawItem).trim().toUpperCase();
-    const idx = parseWeekToIndex(rawWeek, startMonday) + HW;
+    const hasWeek = rawWeek !== undefined && rawWeek !== null && String(rawWeek).trim() !== "";
+    const idx = hasWeek ? parseWeekToIndex(rawWeek, startMonday) + HW : null;
     if (!poPendingByItem[rawItem]) poPendingByItem[rawItem] = new Array(totalCols).fill(0);
     if (!schedReceiptByItem[rawItem]) schedReceiptByItem[rawItem] = new Array(totalCols).fill(0);
 
-    // เก็บเข้า "ตารางแสดงผล" เสมอ ไม่ว่า week จะอยู่ในช่วง horizon/history หรือไม่
-    const inRange = idx >= 0 && idx < totalCols;
+    // เก็บเข้า "ตารางแสดงผล" เสมอ ไม่ว่าจะมีวันที่หรือไม่ก็ตาม (PO ที่ยังไม่ได้ใส่วันที่ก็ยังต้องเห็น จะได้กรอกวันที่เพิ่มทีหลังได้)
+    const inRange = idx !== null && idx >= 0 && idx < totalCols;
     poDetailsByItem[rawItem] = poDetailsByItem[rawItem] || [];
     poDetailsByItem[rawItem].push({
       poNumber: String(extract(r, "po_number", ["ponumber", "ponum", "po", "เลขที่po"], ["po", "doc"]) || "?").trim(),
       vendor: String(extract(r, "vendor", ["vendor", "supplier", "ผู้ขาย"], ["vendor", "sup"]) || "").trim(),
-      quantity: toNum(rawQty), weekIdx: idx, rawWeek: rawWeek,
-      weekLabel: inRange ? weekLabels[idx] : String(rawWeek),
+      quantity: toNum(rawQty), weekIdx: idx === null ? Infinity : idx, rawWeek: hasWeek ? rawWeek : "",
+      weekLabel: inRange ? weekLabels[idx] : (hasWeek ? String(rawWeek) : "ยังไม่ระบุวันที่"),
       mondayDate: inRange ? weekMondayDates[idx] : "",
       outOfHorizon: !inRange,
+      noDate: !hasWeek,
     });
 
-    // ใส่เข้า array คำนวณ MRP เฉพาะที่อยู่ในช่วง horizon เท่านั้น (array ความยาวคงที่)
+    // ใส่เข้า array คำนวณ MRP เฉพาะที่มีวันที่และอยู่ในช่วง horizon เท่านั้น (array ความยาวคงที่)
     if (inRange) {
       poPendingByItem[rawItem][idx] += toNum(rawQty);
       schedReceiptByItem[rawItem][idx] += toNum(rawQty);
@@ -487,68 +526,78 @@ const poDetailsByItem = {};
     // `safety`, and the aggregate adjustment is applied via adjustedConsumption
     // (now also stored per-row so the numbers are traceable).
     const consumption = gr.map((v) => v);
-    const projOnHand = new Array(totalCols).fill(null);
-    const netReq = new Array(totalCols).fill(null);
-    const plannedReceipt = new Array(totalCols).fill(null);
-    const pastDue = new Array(totalCols).fill(false);
-    const adjustedConsumptionArr = new Array(totalCols).fill(null);
 
-    let onHandPrev = effectiveOnHand;
-    for (let fi = 0; fi < horizon; fi++) {
-      const i = HW + fi;
-
-      // ปรับความต้องการในอนาคตด้วยสัดส่วนรวมที่เสถียร (จำกัดช่วง 0.5x-2.0x)
-      const adjustedFactor = Math.max(0.5, Math.min(2.0, consumptionFactor));
-      // FIX #2: removed the extra `* safetyFactor` here — safetyFactor already
-      // raises the `safety` target above, so multiplying demand by it too was
-      // double-applying the buffer.
-      const adjustedConsumption = (gr[i] || 0) * adjustedFactor;
-      adjustedConsumptionArr[i] = adjustedConsumption;
-
-      let proj = onHandPrev + sr[i] - adjustedConsumption;
-      let ordered = 0;
-
-      const releaseIdx = i - leadTime;
-      const overrideReceiptKey = `${item}::${i}`;
-
-      if (receiptOverrides && receiptOverrides[overrideReceiptKey] !== undefined) {
-         ordered = receiptOverrides[overrideReceiptKey];
-      } else {
-         if (proj < safety) {
-            if (releaseIdx < HW && planOverrides && planOverrides[`${item}::${HW}`] !== undefined) {
-               ordered = 0;
-            } else {
-               const need = safety - proj;
-               ordered = Math.ceil(need / lotSize) * lotSize;
-            }
-         }
-      }
-
-      plannedReceipt[i] = ordered;
-      proj += ordered;
-      projOnHand[i] = proj;
-      netReq[i] = Math.max(0, safety - (onHandPrev + sr[i] - adjustedConsumption));
-      onHandPrev = proj;
-    }
-
-    const calcPlannedRelease = new Array(totalCols).fill(0);
-    for (let fi = 0; fi < horizon; fi++) {
-      const i = HW + fi;
-      if (plannedReceipt[i] > 0) {
+    // ฟังก์ชันจำลองการวางแผน (safety-stock trigger + lot sizing + lead time offset) แยกออกมาเรียกซ้ำได้
+    // เพราะต้องคำนวณ 2 รอบ: รอบหนึ่งรวม forecast (สำหรับโชว์ที่ตัว FG เอง) อีกรอบใช้ยอด confirmed ล้วนๆ
+    // (สำหรับส่งต่อไปกระตุ้นคำสั่งซื้อ raw material — ไม่ให้ forecast ไปดันยอดสั่งซื้อวัตถุดิบ)
+    function simulatePlan(grArr) {
+      const projOnHandL = new Array(totalCols).fill(null);
+      const netReqL = new Array(totalCols).fill(null);
+      const plannedReceiptL = new Array(totalCols).fill(null);
+      const pastDueL = new Array(totalCols).fill(false);
+      const adjustedConsumptionArrL = new Array(totalCols).fill(null);
+      let onHandPrevL = effectiveOnHand;
+      for (let fi = 0; fi < horizon; fi++) {
+        const i = HW + fi;
+        const adjustedFactor = Math.max(0.5, Math.min(2.0, consumptionFactor));
+        const adjustedConsumption = (grArr[i] || 0) * adjustedFactor;
+        adjustedConsumptionArrL[i] = adjustedConsumption;
+        const expiredThisWeek = expiredByWeek[i] || 0;
+        let proj = onHandPrevL + sr[i] - adjustedConsumption - expiredThisWeek;
+        let ordered = 0;
         const releaseIdx = i - leadTime;
-        if (releaseIdx >= HW) {
-          calcPlannedRelease[releaseIdx] += plannedReceipt[i];
+        const overrideReceiptKey = `${item}::${i}`;
+        if (receiptOverrides && receiptOverrides[overrideReceiptKey] !== undefined) {
+          ordered = receiptOverrides[overrideReceiptKey];
         } else {
-          calcPlannedRelease[HW] += plannedReceipt[i];
-          pastDue[HW] = true;
+          if (proj < safety) {
+            if (releaseIdx < HW && planOverrides && planOverrides[`${item}::${HW}`] !== undefined) {
+              ordered = 0;
+            } else {
+              const need = safety - proj;
+              ordered = Math.ceil(need / lotSize) * lotSize;
+            }
+          }
+        }
+        plannedReceiptL[i] = ordered;
+        proj += ordered;
+        projOnHandL[i] = proj;
+        netReqL[i] = Math.max(0, safety - (onHandPrevL + sr[i] - adjustedConsumption - expiredThisWeek));
+        onHandPrevL = proj;
+      }
+      const calcPlannedReleaseL = new Array(totalCols).fill(0);
+      for (let fi = 0; fi < horizon; fi++) {
+        const i = HW + fi;
+        if (plannedReceiptL[i] > 0) {
+          const releaseIdx = i - leadTime;
+          if (releaseIdx >= HW) {
+            calcPlannedReleaseL[releaseIdx] += plannedReceiptL[i];
+          } else {
+            calcPlannedReleaseL[HW] += plannedReceiptL[i];
+            pastDueL[HW] = true;
+          }
         }
       }
+      const finalPlannedReleaseL = calcPlannedReleaseL.map((v, idx) => {
+        const key = `${item}::${idx}`;
+        return planOverrides && planOverrides[key] !== undefined ? planOverrides[key] : v;
+      });
+      return { projOnHand: projOnHandL, netReq: netReqL, plannedReceipt: plannedReceiptL, pastDue: pastDueL, adjustedConsumptionArr: adjustedConsumptionArrL, finalPlannedRelease: finalPlannedReleaseL };
     }
 
-    const finalPlannedRelease = calcPlannedRelease.map((v, idx) => {
-      const key = `${item}::${idx}`;
-      return planOverrides && planOverrides[key] !== undefined ? planOverrides[key] : v;
-    });
+    // รอบหลัก: ใช้ gr เต็ม (confirmed + forecast) — ค่านี้เอาไปโชว์ที่ตัว item เองทุกแถวเหมือนเดิมทุกอย่าง
+    const mainSim = simulatePlan(gr);
+    const { projOnHand, netReq, plannedReceipt, pastDue, adjustedConsumptionArr, finalPlannedRelease } = mainSim;
+
+    // รอบสำหรับ cascade ไปยัง raw material: ถ้า item นี้มีสัปดาห์ที่เป็น forecast ให้คำนวณแยกโดยตัด forecast
+    // ออกก่อน (แทนที่ด้วย 0) แล้วใช้ผลจากรอบนี้ในการกระตุ้นคำสั่งซื้อของ component แทน ไม่ใช่ finalPlannedRelease
+    const itemForecastFlag = forecastFlag[item] || new Array(totalCols).fill(false);
+    const hasForecastWeeks = itemForecastFlag.some(Boolean);
+    let cascadeRelease = finalPlannedRelease;
+    if (hasForecastWeeks) {
+      const confirmedOnlyGr = gr.map((v, i) => (itemForecastFlag[i] ? 0 : v));
+      cascadeRelease = simulatePlan(confirmedOnlyGr).finalPlannedRelease;
+    }
 
     const kids = childrenOf[item] || [];
     kids.forEach(({ component, qty_per }) => {
@@ -560,7 +609,7 @@ const poDetailsByItem = {};
             grossReq[component][pastReleaseIdx] += (gr[i] || 0) * qty_per;
           }
         } else {
-          grossReq[component][i] += (finalPlannedRelease[i] || 0) * qty_per;
+          grossReq[component][i] += (cascadeRelease[i] || 0) * qty_per;
         }
       }
     });
@@ -570,6 +619,16 @@ const poDetailsByItem = {};
       description: inv.description || item,
       unit: inv.unit || "EA",
       vendor: String(inv.vendor || "").trim(),
+      country: String(inv.country || "").trim(),
+      // ตัดสินว่า vendor เป็นต่างประเทศ (oversea) หรือไม่ — ใช้คอลัมน์ที่กรอกมาตรงๆ ก่อนเป็นอันดับแรก
+      // (is_overseas ชัดเจนสุด, รองลงมาคือ country ถ้าไม่ใช่ไทย) ถ้าไม่มีทั้งสองคอลัมน์เลยค่อย fallback ไปเดาจากชื่อ vendor
+      isOverseas: (() => {
+        const rawFlag = String(inv.is_overseas || "").trim().toLowerCase();
+        if (rawFlag) return ["yes", "y", "true", "1", "oversea", "overseas", "ต่างประเทศ"].includes(rawFlag);
+        const rawCountry = String(inv.country || "").trim().toLowerCase();
+        if (rawCountry) return !["thailand", "th", "ไทย", "thai"].includes(rawCountry);
+        return isOverseasVendor(inv.vendor);
+      })(),
       moldFamily: String(inv.moldFamily || "").trim(),
       unitPrice: toNum(inv.unit_price, 0),
       level: level[item] || 0,
@@ -592,6 +651,10 @@ const poDetailsByItem = {};
       expiringSoon,
       weeksToExpiry,
       grossReq: gr,
+      isForecast: forecastFlag[item] || new Array(totalCols).fill(false),
+      // แยกยอด demand ให้เห็นชัดว่าอันไหนคือยอดจริง (confirmed) อันไหนคือค่าพยากรณ์ (forecast)
+      demandConfirmed: gr.map((v, i) => ((forecastFlag[item] && forecastFlag[item][i]) ? null : ((confirmedDemand[item] && confirmedDemand[item][i]) || null))),
+      demandForecast: gr.map((v, i) => ((forecastFlag[item] && forecastFlag[item][i]) ? v : null)),
       consumption,
       adjustedConsumption: adjustedConsumptionArr,
       // Per-row comparison helpers: null in history weeks (adjustedConsumption
@@ -685,7 +748,8 @@ function parseCSV(file, onDone) {
 
 function downloadCSV(filename, rows) {
   const csv = Papa.unparse(rows);
-  const blob = new Blob([csv], { type: "text/csv" });
+  // ใส่ UTF-8 BOM (\uFEFF) นำหน้า กัน Excel เปิดแล้วตัวอักษรไทย/ภาษาอื่นกลายเป็นตัวอักษรมั่วๆ (mojibake)
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -753,15 +817,16 @@ function UploadSlot({ label, hint, onFile, loaded, count, onSample }) {
   );
 }
 
-function KPI({ label, value, tone, icon: Icon, mobile }) {
+function KPI({ label, value, tone, icon: Icon, mobile, onClick }) {
   const toneColor = tone === "rust" ? COLORS.rust : tone === "amber" ? COLORS.amber : tone === "moss" ? COLORS.moss : COLORS.steelDeep;
   return (
-    <div style={{
+    <div onClick={onClick} style={{
       background: COLORS.card, border: `1px solid ${COLORS.paperLine}`, borderTop: `3px solid ${toneColor}`,
       borderRadius: COLORS.radius, boxShadow: COLORS.shadow,
       padding: "14px 16px", flex: mobile ? "0 0 auto" : 1, minWidth: mobile ? 160 : 150,
       scrollSnapAlign: mobile ? "start" : "none",
       transition: "transform 0.15s ease, box-shadow 0.15s ease",
+      cursor: onClick ? "pointer" : "default",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, color: toneColor, marginBottom: 6 }}>
         <Icon size={14} />
@@ -772,9 +837,11 @@ function KPI({ label, value, tone, icon: Icon, mobile }) {
   );
 }
 
-function TreeRow({ item, records, childrenOf, selected, onSelect, depth, onlyWithOrders, subtreeOrderMap, forceOpen, clearForce }) {
+function TreeRow({ item, records, childrenOf, selected, onSelect, depth, onlyWithOrders, subtreeOrderMap, forceOpen }) {
   const [open, setOpen] = useState(depth < 1);
-  const effectiveOpen = forceOpen !== null ? forceOpen : open;
+  useEffect(() => {
+    if (forceOpen && forceOpen.value !== null) setOpen(forceOpen.value);
+  }, [forceOpen && forceOpen.key]);
   const rec = records[item];
   if (!rec) return null;
   const kids = (childrenOf[item] || []).filter((k) => !onlyWithOrders || subtreeOrderMap[k.component]);
@@ -799,10 +866,9 @@ function TreeRow({ item, records, childrenOf, selected, onSelect, depth, onlyWit
           {kids.length > 0 ? (
             <span onClick={(e) => {
               e.stopPropagation();
-              setOpen(!effectiveOpen);
-              if (forceOpen !== null) clearForce();
+              setOpen(!open);
             }} style={{ display: "flex" }}>
-              {effectiveOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+              {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
             </span>
           ) : <span style={{ width: 13 }} />}
           <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -830,19 +896,21 @@ function TreeRow({ item, records, childrenOf, selected, onSelect, depth, onlyWit
           {rec.description} · {rec.unit}
         </div>
       </div>
-      {effectiveOpen && kids.map((k) => (
+      {open && kids.map((k) => (
         <TreeRow key={k.component} item={k.component} records={records} childrenOf={childrenOf}
           selected={selected} onSelect={onSelect} depth={depth + 1}
           onlyWithOrders={onlyWithOrders} subtreeOrderMap={subtreeOrderMap}
-          forceOpen={forceOpen} clearForce={clearForce} />
+          forceOpen={forceOpen} />
       ))}
     </div>
   );
 }
 
-function VendorGroupRow({ vendor, items, records, selected, onSelect, onlyWithOrders, forceOpen, clearForce }) {
+function VendorGroupRow({ vendor, items, records, selected, onSelect, onlyWithOrders, forceOpen }) {
   const [open, setOpen] = useState(true);
-  const effectiveOpen = forceOpen !== null ? forceOpen : open;
+  useEffect(() => {
+    if (forceOpen && forceOpen.value !== null) setOpen(forceOpen.value);
+  }, [forceOpen && forceOpen.key]);
   const visibleItems = onlyWithOrders ? items.filter((it) => records[it].plannedRelease.some((v) => v > 0)) : items;
   if (onlyWithOrders && visibleItems.length === 0) return null;
   const anyCritical = visibleItems.some((it) => records[it].pastDue.some(Boolean));
@@ -851,20 +919,20 @@ function VendorGroupRow({ vendor, items, records, selected, onSelect, onlyWithOr
   return (
     <div>
       <div
-        onClick={() => { setOpen(!effectiveOpen); if (forceOpen !== null) clearForce(); }}
+        onClick={() => setOpen(!open)}
         style={{
           display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
           padding: "5px 6px", background: COLORS.paper, borderLeft: `3px solid ${COLORS.steel}`,
         }}
       >
-        {effectiveOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 11.5, fontWeight: 700, color: COLORS.ink, flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
           {vendor} <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 400, color: COLORS.inkSoft, fontSize: 10.5 }}>({visibleItems.length})</span>
         </span>
         {anyCritical && <CircleAlert size={12} color={COLORS.rust} />}
         {!anyCritical && anyShortage && <AlertTriangle size={11} color={COLORS.amber} />}
       </div>
-      {effectiveOpen && visibleItems.map((it) => {
+      {open && visibleItems.map((it) => {
         const rec = records[it];
         const isSelected = selected === it;
         const critical = rec.pastDue.some(Boolean);
@@ -883,7 +951,7 @@ function VendorGroupRow({ vendor, items, records, selected, onSelect, onlyWithOr
               {!critical && shortage && <AlertTriangle size={11} color={isSelected ? "#FFE9C6" : COLORS.amber} />}
             </div>
             <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, paddingLeft: 17, color: isSelected ? "#E4E7EC" : COLORS.inkSoft, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              {rec.description} {"\u00b7"} {rec.unit}
+              {rec.description} {"·"} {rec.unit}
             </div>
           </div>
         );
@@ -892,30 +960,80 @@ function VendorGroupRow({ vendor, items, records, selected, onSelect, onlyWithOr
   );
 }
 
-function VendorGroupTree({ groups, records, selected, onSelect, onlyWithOrders, forceOpen, clearForce }) {
+function VendorGroupTree({ groups, records, selected, onSelect, onlyWithOrders, forceOpen }) {
   return (
     <div>
       {groups.map((g) => (
         <VendorGroupRow key={g.vendor} vendor={g.vendor} items={g.items} records={records}
           selected={selected} onSelect={onSelect} onlyWithOrders={onlyWithOrders}
-          forceOpen={forceOpen} clearForce={clearForce} />
+          forceOpen={forceOpen} />
       ))}
     </div>
   );
 }
 
-function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustPlan, onResetPlanOverride, onAdjustReceipt, onResetReceiptOverride, onAdjustPOQty, poOriginalQtyMap, onResetPOQty, onAdjustPOWeek, onResetPOWeek, poOriginalMap, planOverrides, receiptOverrides, isMobile, draftRefs, onAdjustDraftRef, moldFamilyMembers }) {
+function ProjectGroupRow({ project, items, records, childrenOf, selected, onSelect, onlyWithOrders, subtreeOrderMap, forceOpen }) {
+  const [open, setOpen] = useState(true);
+  useEffect(() => {
+    if (forceOpen && forceOpen.value !== null) setOpen(forceOpen.value);
+  }, [forceOpen && forceOpen.key]);
+  const visibleItems = onlyWithOrders ? items.filter((it) => subtreeOrderMap[it]) : items;
+  if (onlyWithOrders && visibleItems.length === 0) return null;
+  const anyCritical = visibleItems.some((it) => records[it].pastDue.some(Boolean));
+  const anyShortage = visibleItems.some((it) => records[it].plannedRelease.some((v) => v > 0));
+
+  return (
+    <div>
+      <div
+        onClick={() => setOpen(!open)}
+        style={{
+          display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
+          padding: "5px 6px", background: COLORS.paper, borderLeft: `3px solid ${COLORS.amber}`,
+        }}
+      >
+        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 11.5, fontWeight: 700, color: COLORS.ink, flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {project} <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 400, color: COLORS.inkSoft, fontSize: 10.5 }}>({visibleItems.length})</span>
+        </span>
+        {anyCritical && <CircleAlert size={12} color={COLORS.rust} />}
+        {!anyCritical && anyShortage && <AlertTriangle size={11} color={COLORS.amber} />}
+      </div>
+      {open && visibleItems.map((it) => (
+        <TreeRow key={it} item={it} records={records} childrenOf={childrenOf}
+          selected={selected} onSelect={onSelect} depth={0}
+          onlyWithOrders={onlyWithOrders} subtreeOrderMap={subtreeOrderMap}
+          forceOpen={forceOpen} />
+      ))}
+    </div>
+  );
+}
+
+function ProjectGroupTree({ groups, records, childrenOf, selected, onSelect, onlyWithOrders, subtreeOrderMap, forceOpen }) {
+  return (
+    <div>
+      {groups.map((g) => (
+        <ProjectGroupRow key={g.project} project={g.project} items={g.items} records={records} childrenOf={childrenOf}
+          selected={selected} onSelect={onSelect} onlyWithOrders={onlyWithOrders} subtreeOrderMap={subtreeOrderMap}
+          forceOpen={forceOpen} />
+      ))}
+    </div>
+  );
+}
+
+function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustPlan, onResetPlanOverride, onAdjustReceipt, onResetReceiptOverride, onAdjustPOQty, poOriginalQtyMap, onResetPOQty, onAdjustPOWeek, onResetPOWeek, poOriginalMap, planOverrides, receiptOverrides, isMobile, draftRefs, onAdjustDraftRef, moldFamilyMembers, isReadOnly }) {
   if (!rec) return null;
   const rows = [
     { label: "Gross requirements (calculated)", data: rec.grossReq, kind: "gr" },
-    { label: `Consumption used for planning (\u00d7${rec.consumptionFactor.toFixed(2)})`, data: rec.consumption, kind: "consumption" },
+    { label: "  \u2514 Demand (confirmed)", data: rec.demandConfirmed, kind: "demandconfirmed" },
+    { label: "  \u2514 Demand (forecast)", data: rec.demandForecast, kind: "demandforecast" },
+    { label: `Consumption used for planning (×${rec.consumptionFactor.toFixed(2)})`, data: rec.consumption, kind: "consumption" },
     { label: "Actual consumption (issued)", data: rec.actualConsumption, kind: "actual" },
    { label: "Variance (Qty / %)", data: rec.consumptionVariance, kind: "variance" },
     { label: "PO pending", data: rec.poPending, kind: "po" },
     { label: "Goods in transit (GIT)", data: rec.git, kind: "git" },
     { label: "Expired quantity", data: rec.expiredByWeek, kind: "expline" },
     { label: "Projected on hand", data: rec.projOnHand, kind: "poh" },
-    { label: `Safety stock remaining (On-hand \u2212 SS ${rec.safety})`, data: rec.projOnHand.map((v) => (v === null || v === undefined ? null : v - rec.safety)), kind: "ssline" },
+    { label: `Safety stock remaining (On-hand − SS ${rec.safety})`, data: rec.projOnHand.map((v) => (v === null || v === undefined ? null : v - rec.safety)), kind: "ssline" },
     { label: "Net requirements", data: rec.netReq, kind: "nr" },
     { label: "Planned order receipt", data: rec.plannedReceipt, kind: "por" },
     { label: "Planned order release", data: rec.plannedRelease, kind: "prel" },
@@ -932,7 +1050,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
   if (pastGrossTotal === 0 && rec.pastActualTotal === 0) {
     pastVarPctStr = "0%";
   } else if (pastGrossTotal === 0 && rec.pastActualTotal > 0) {
-    pastVarPctStr = "+\u221E%";
+    pastVarPctStr = "+∞%";
   } else {
     const pct = (pastVarianceTotal / pastGrossTotal) * 100;
     pastVarPctStr = pct > 0 ? `+${pct.toFixed(1)}%` : `${pct.toFixed(1)}%`;
@@ -963,7 +1081,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
           ["ITEM", rec.item],
           ["UNIT", rec.unit],
           ["LEAD TIME (WK)", rec.leadTime],
-          ["LOT SIZE / SS", `${rec.lotSize} / ${rec.baseSafety}${rec.safetyFactor !== 1 ? ` \u00d7${rec.safetyFactor} = ${rec.safety}` : ""}`],
+          ["LOT SIZE / SS", `${rec.lotSize} / ${rec.baseSafety}${rec.safetyFactor !== 1 ? ` ×${rec.safetyFactor} = ${rec.safety}` : ""}`],
           ["ON HAND (usable/total)", `${rec.usableOnHand.toLocaleString()} / ${rec.onHand.toLocaleString()} ${rec.unit}`],
           [`PAST ${historyWeeks}W AVG`, (
             <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
@@ -975,10 +1093,10 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
           )],
           ["EXPIRY", rec.batches.length > 0
             ? `${rec.batches.length} batch${rec.batches.length === 1 ? "" : "es"}${rec.expired ? " (ALL EXPIRED)" : rec.expiredQty > 0 ? ` (${rec.expiredQty} exp.)` : ""}`
-            : (rec.expiryDate ? (rec.expired ? "EXPIRED" : rec.expiryDate) : "\u2014")],
+            : (rec.expiryDate ? (rec.expired ? "EXPIRED" : rec.expiryDate) : "—")],
           ["UNIT PRICE / VALUE", rec.unitPrice > 0
-            ? `${rec.unitPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })} \u00d7 ${rec.usableOnHand} = ${rec.usableValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
-            : "\u2014"],
+            ? `${rec.unitPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })} × ${rec.usableOnHand} = ${rec.usableValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+            : "—"],
         ].map(([k, v], i) => (
           <div key={k} style={{
             padding: "6px 10px",
@@ -992,11 +1110,11 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
         ))}
       </div>
       <div style={{ padding: "8px 10px 2px", fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 600, color: COLORS.ink }}>
-        {rec.description} <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 400, color: COLORS.inkSoft }}>({rec.unit}){rec.vendor ? ` \u00b7 ${rec.vendor}` : ""}</span>
+        {rec.description} <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 400, color: COLORS.inkSoft }}>({rec.unit}){rec.vendor ? ` · ${rec.vendor}` : ""}</span>
       </div>
-      {rec.parentsCount > 1 && (
+      {rec.hasParents && rec.parentsCount >= 1 && (
         <div style={{ padding: "0 10px 8px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.steel, display: "flex", alignItems: "center", gap: 4 }}>
-          <Layers size={11} /> common component — used in {rec.parentsCount} assemblies: {rec.parentItems.join(", ")}
+          <Layers size={11} /> {rec.parentsCount > 1 ? `common component — used in ${rec.parentsCount} assemblies` : `used in`}: {rec.parentItems.join(", ")}
         </div>
       )}
       {rec.moldFamily && moldFamilyMembers && moldFamilyMembers.length > 0 && (
@@ -1008,7 +1126,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
         <div style={{ padding: "0 10px 8px" }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.steel, display: "flex", alignItems: "center", gap: 4, marginBottom: 4 }}>
             <CalendarX size={11} /> batch breakdown (FEFO order) — usable {rec.usableOnHand} / total {rec.onHand} {rec.unit}
-            {rec.expiredQty > 0 && <span style={{ color: COLORS.rust }}>&nbsp;{"\u00b7"} {rec.expiredQty} {rec.unit} expired, excluded</span>}
+            {rec.expiredQty > 0 && <span style={{ color: COLORS.rust }}>&nbsp;{"·"} {rec.expiredQty} {rec.unit} expired, excluded</span>}
           </div>
           <table style={{ borderCollapse: "collapse", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, width: "100%", maxWidth: 480 }}>
             <thead>
@@ -1024,7 +1142,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                 <tr key={b.batchNo}>
                   <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{b.batchNo}</td>
                   <td style={{ padding: "2px 8px" }}>{b.quantity}</td>
-                  <td style={{ padding: "2px 8px" }}>{b.expiryDate || "\u2014"}</td>
+                  <td style={{ padding: "2px 8px" }}>{b.expiryDate || "—"}</td>
                   <td style={{ padding: "2px 0" }}>
                     <span style={{
                       fontSize: 9.5, padding: "1px 7px", borderRadius: 999, fontWeight: 600,
@@ -1075,20 +1193,20 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
     return (
       <tr key={`${p.poNumber}-${i}`}>
         <td style={{ padding: "2px 8px 2px 0", color: COLORS.ink }}>{p.poNumber}</td>
-        <td style={{ padding: "2px 8px", color: COLORS.inkSoft }}>{p.vendor || "\u2014"}</td>
+        <td style={{ padding: "2px 8px", color: COLORS.inkSoft }}>{p.vendor || "—"}</td>
                     <td style={{ padding: "0 4px" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
-                        {isQtyOverridden && (
+                        {isQtyOverridden && !isReadOnly && (
                           <button onClick={() => onResetPOQty(rec.item, p.poNumber)} title={`reset to original (${origQty})`} style={{
                             border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
                             fontSize: 9, padding: 0, lineHeight: 1,
                           }}>&#8635;</button>
                         )}
-                        <input type="number" min={0} value={p.quantity}
+                        <input type="number" min={0} value={p.quantity} disabled={isReadOnly}
                           onChange={(e) => onAdjustPOQty(rec.item, p.poNumber, e.target.value)}
                           style={{
                             width: 48, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
-                            border: `1px solid ${isQtyOverridden ? COLORS.amber : COLORS.paperLine}`, background: "#fff", color: COLORS.ink, padding: "1px 3px",
+                            border: `1px solid ${isQtyOverridden ? COLORS.amber : COLORS.paperLine}`, background: isReadOnly ? "transparent" : "#fff", color: COLORS.ink, padding: "1px 3px",
                           }} />
                       </div>
                     </td>
@@ -1096,22 +1214,28 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                      <td style={{ padding: "0 4px" }}>
                       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
-                          {isWeekOverridden && (
+                          {isWeekOverridden && !isReadOnly && (
                             <button onClick={() => onResetPOWeek(rec.item, p.poNumber)} title={`reset to original (${origWeek.week})`} style={{
                               border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
                               fontSize: 9, padding: 0, lineHeight: 1,
                             }}>&#8635;</button>
                           )}
-                          <input type="text" defaultValue={p.rawWeek}
+                          <input type="text" defaultValue={p.rawWeek} disabled={isReadOnly}
                             onBlur={(e) => onAdjustPOWeek(rec.item, p.poNumber, e.target.value)}
                             onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+                            placeholder={p.noDate ? "กรอกวันที่" : ""}
                             title="e.g. 26CW30 or 3"
                             style={{
                               width: 56, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5,
-                              border: `1px solid ${isWeekOverridden ? COLORS.amber : COLORS.paperLine}`, background: "#fff", color: COLORS.ink, padding: "1px 3px",
+                              border: `1px solid ${isWeekOverridden ? COLORS.amber : p.noDate ? COLORS.amber : COLORS.paperLine}`, background: isReadOnly ? "transparent" : "#fff", color: COLORS.ink, padding: "1px 3px",
                             }} />
                         </div>
-                        {p.outOfHorizon && (
+                        {p.noDate ? (
+                          <span title="PO ใบนี้ยังไม่ได้ระบุวันที่ครบกำหนด — กรอกในช่อง DUE WK ด้านบนแล้วจะถูกนำไปคำนวณ MRP ให้อัตโนมัติ" style={{
+                            fontSize: 8.5, padding: "0 5px", color: COLORS.amber, borderRadius: 999,
+                            border: `1px solid ${COLORS.amber}`, background: "#FEF3C7", whiteSpace: "nowrap", fontWeight: 600,
+                          }}>NO DATE</span>
+                        ) : p.outOfHorizon && (
                           <span title="วันครบกำหนดอยู่นอกช่วง horizon/history ที่ตั้งไว้ตอนนี้ — ไม่ถูกนำไปคำนวณ MRP" style={{
                             fontSize: 8.5, padding: "0 5px", color: COLORS.inkSoft, borderRadius: 999,
                             border: `1px solid ${COLORS.paperLine}`, whiteSpace: "nowrap",
@@ -1119,7 +1243,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                         )}
                       </div>
                     </td>
-                    <td style={{ padding: "2px 0", color: COLORS.inkSoft }}>{p.mondayDate || "\u2014"}</td>
+                    <td style={{ padding: "2px 0", color: COLORS.inkSoft }}>{p.mondayDate || "—"}</td>
                   </tr>
                 );
               })}
@@ -1171,13 +1295,18 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                   if (r.kind === "po" && v > 0) { bg = "#FEF3C7"; color = COLORS.amber; }
                   if (r.kind === "git" && v > 0) { bg = "#DCFCE7"; color = COLORS.moss; }
                   if (r.kind === "expline" && v > 0) { bg = COLORS.rust; color = "#fff"; }
+                  if (r.kind === "gr" && rec.isForecast && rec.isForecast[i] && v > 0) { bg = "#EDE9FE"; color = "#6D28D9"; }
+                  if (r.kind === "demandconfirmed" && v > 0) { bg = "#DCFCE7"; color = COLORS.moss; }
+                  if (r.kind === "demandforecast" && v > 0) { bg = "#EDE9FE"; color = "#6D28D9"; }
                   if (r.kind === "consumption" && rec.consumptionFactor !== 1 && v > 0) { bg = "#E0E7FF"; color = COLORS.steelDeep; }
                   if (r.kind === "actual" && v > 0) { bg = "#EDE9FE"; color = "#6D28D9"; }
                   if (r.kind === "ssline" && v !== null) {
-                    // แดง: stock ต่ำกว่า safety stock ของ item นั้นเอง
+                    // แดง: stock ต่ำกว่าหรือเท่ากับ safety stock ของ item นั้นเอง (รวมกรณีเหลือ 0 พอดี)
                     // เหลือง: ยังไม่ต่ำกว่า SS แต่ buffer ที่เหลือ (stock - SS) น้อยกว่าอัตราเบิกใช้เฉลี่ย 1 สัปดาห์ (Past AVG) — ใกล้ทะลุ SS ภายในไม่ถึง 1 สัปดาห์
-                    if (v < 0) { bg = COLORS.rust; color = "#fff"; }
-                    else if (rec.pastActualAvg > 0 && v < rec.pastActualAvg) { bg = "#FEF3C7"; color = COLORS.amber; }
+                    // ใช้ค่าที่ปัดเศษแล้ว (Math.round) ในการเช็คสี ให้ตรงกับตัวเลขที่โชว์บนตารางจริงๆ (กันกรณีค่าจริงเช่น 0.4 แต่โชว์ "0")
+                    const vRounded = Math.round(v);
+                    if (vRounded <= 0) { bg = COLORS.rust; color = "#fff"; }
+                    else if (rec.pastActualAvg > 0 && vRounded < rec.pastActualAvg) { bg = "#FEF3C7"; color = COLORS.amber; }
                     else { bg = "#DCFCE7"; color = COLORS.moss; }
                   }
                   if (r.kind === "ltline") { bg = "transparent"; color = COLORS.steel; }
@@ -1212,8 +1341,8 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                   const onAdjust = r.kind === "prel" ? onAdjustPlan : onAdjustReceipt;
                   const onReset = r.kind === "prel" ? onResetPlanOverride : onResetReceiptOverride;
                   const tooltipMsg = r.kind === "prel" 
-                    ? `LT = ${rec.leadTime} wk \u2192 Arrives: ${i + rec.leadTime < weeks.length ? weekLabels[i + rec.leadTime] : "Out of horizon"}`
-                    : `Receipt in ${weekLabels[i]} \u2192 Pushes On-Hand up`;
+                    ? `LT = ${rec.leadTime} wk → Arrives: ${i + rec.leadTime < weeks.length ? weekLabels[i + rec.leadTime] : "Out of horizon"}`
+                    : `Receipt in ${weekLabels[i]} → Pushes On-Hand up`;
 
                 return (
                     <td key={i} style={{
@@ -1225,7 +1354,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                       {isEditable ? (
                         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
                           <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2 }}>
-                            {isOverridden && (
+                            {isOverridden && !isReadOnly && (
                               <button onClick={() => onReset(rec.item, i)} title="reset to calculated value" style={{
                                 border: "none", background: "transparent", cursor: "pointer", color: COLORS.amber,
                                 fontSize: 9, padding: 0, lineHeight: 1,
@@ -1236,6 +1365,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                               value={displayVal}
                               placeholder="—"
                               title={tooltipMsg}
+                              disabled={isReadOnly}
                               onChange={(e) => onAdjust(rec.item, i, e.target.value)}
                               style={{
                                 width: 42, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5,
@@ -1249,10 +1379,11 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                               value={draftRefs[`${rec.item}::${i}::${r.kind}`] || ""}
                               placeholder={r.kind === "prel" ? "PR#" : "PO#"}
                               title={r.kind === "prel" ? "เลขที่ Draft PR (กรอกเองถ้าระบบยังไม่ได้ดึงมา)" : "เลขที่ Draft PO (กรอกเองถ้าระบบยังไม่ได้ดึงมา)"}
+                              disabled={isReadOnly}
                               onChange={(e) => onAdjustDraftRef(rec.item, i, r.kind, e.target.value)}
                               style={{
                                 width: 44, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 9,
-                                border: `1px solid ${COLORS.paperLine}`, borderRadius: 4, background: "#fff",
+                                border: `1px solid ${COLORS.paperLine}`, borderRadius: 4, background: isReadOnly ? "transparent" : "#fff",
                                 color: COLORS.steel, padding: "1px 3px",
                               }}
                             />
@@ -1268,7 +1399,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                             const invertedV = plan - act;
                             let pctStr = "";
                             if (plan === 0 && act > 0) {
-                              pctStr = "-\u221E%"; 
+                              pctStr = "-∞%"; 
                             } else {
                               const pct = (invertedV / plan) * 100;
                               pctStr = pct > 0 ? `+${pct.toFixed(1)}%` : `${pct.toFixed(1)}%`;
@@ -1292,7 +1423,7 @@ function RecordGrid({ rec, weeks, weekLabels, weekDates, historyWeeks, onAdjustP
                   borderTop: `1px solid ${COLORS.paperLine}`, borderLeft: `2px solid ${COLORS.steel}`,
                   background: COLORS.paper, whiteSpace: "nowrap",
                 }}>
-                  {r.kind === "ssline" || r.kind === "ltline" ? "\u2014" : Math.round(total).toLocaleString()}
+                  {r.kind === "ssline" || r.kind === "ltline" ? "—" : Math.round(total).toLocaleString()}
                 </td>
               </tr>
             );
@@ -1311,7 +1442,7 @@ const STATUS_OPTIONS = [
   { value: "received", label: "Received", bg: "#EDE9FE", color: "#6D28D9" },
 ];
 
-function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus, selectedItem }) {
+function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus, selectedItem, isReadOnly }) {
   const [hideReceived, setHideReceived] = useState(false);
   const [onlySelected, setOnlySelected] = useState(true);
   const rows = [];
@@ -1328,28 +1459,6 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
     });
   });
   rows.sort((a, b) => a.releaseIdx - b.releaseIdx);
-
-  // เช็คว่า item ในเซ็ต mold family เดียวกัน มีแผน planned release คนละสัปดาห์ไหม — ถ้าใช่ เตือนให้รวมสั่งพร้อมกัน
-  const familyMisalignment = [];
-  {
-    const byFamily = {};
-    rows.forEach((r) => {
-      const fam = records[r.item] && records[r.item].moldFamily;
-      if (!fam) return;
-      byFamily[fam] = byFamily[fam] || {};
-      byFamily[fam][r.releaseWeek] = byFamily[fam][r.releaseWeek] || new Set();
-      byFamily[fam][r.releaseWeek].add(r.item);
-    });
-    Object.entries(byFamily).forEach(([fam, byWeek]) => {
-      const weeksList = Object.keys(byWeek);
-      if (weeksList.length > 1) {
-        familyMisalignment.push({
-          fam,
-          detail: weeksList.map((w) => `${w}: ${Array.from(byWeek[w]).join(", ")}`).join(" · "),
-        });
-      }
-    });
-  }
 
   const getEntry = (key) => orderStatus[key] || { status: "pending", poNumber: "" };
   const updateEntry = (key, patch) => {
@@ -1425,16 +1534,6 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
           </span>
         ))}
       </div>
-      {familyMisalignment.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: "8px 12px", borderBottom: `1px solid ${COLORS.paperLine}`, background: "#FEF3C7" }}>
-          {familyMisalignment.map((f) => (
-            <div key={f.fam} style={{ display: "flex", alignItems: "flex-start", gap: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: "#92400E" }}>
-              <Layers size={12} style={{ marginTop: 1, flexShrink: 0 }} />
-              <span><b>mold family "{f.fam}"</b> มีแผนสั่งคนละสัปดาห์ — พิจารณารวมสั่งพร้อมกัน: {f.detail}</span>
-            </div>
-          ))}
-        </div>
-      )}
       <div style={{ maxHeight: 300, overflowY: "auto" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 }}>
           <thead>
@@ -1460,20 +1559,20 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
                   <td style={{ padding: "5px 10px", textAlign: "right", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.inkSoft }}>{r.unit}</td>
                   <td style={{ padding: "5px 10px", textAlign: "right", borderBottom: `1px solid ${COLORS.paperLine}` }}>{r.receiptWeek}</td>
                   <td style={{ padding: "4px 8px", textAlign: "right", borderBottom: `1px solid ${COLORS.paperLine}` }}>
-                    <select value={entry.status} onChange={(e) => updateEntry(r.key, { status: e.target.value })} style={{
+                    <select value={entry.status} disabled={isReadOnly} onChange={(e) => updateEntry(r.key, { status: e.target.value })} style={{
                       fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, padding: "3px 8px", fontWeight: 600,
                       background: statusMeta.bg, color: statusMeta.color, border: `1px solid ${statusMeta.color}`,
-                      borderRadius: 999, cursor: "pointer",
+                      borderRadius: 999, cursor: isReadOnly ? "default" : "pointer",
                     }}>
                       {STATUS_OPTIONS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                     </select>
                   </td>
                   <td style={{ padding: "4px 8px", textAlign: "right", borderBottom: `1px solid ${COLORS.paperLine}` }}>
-                    <input type="text" value={entry.poNumber} placeholder="TPO####"
+                    <input type="text" value={entry.poNumber} placeholder="TPO####" disabled={isReadOnly}
                       onChange={(e) => updateEntry(r.key, { poNumber: e.target.value })}
                       style={{
                         fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, width: 78, textAlign: "right",
-                        border: `1px solid ${COLORS.paperLine}`, padding: "2px 4px", background: "#fff", color: COLORS.ink, borderRadius: COLORS.radiusSm,
+                        border: `1px solid ${COLORS.paperLine}`, padding: "2px 4px", background: isReadOnly ? "transparent" : "#fff", color: COLORS.ink, borderRadius: COLORS.radiusSm,
                       }} />
                   </td>
                 </tr>
@@ -1491,7 +1590,7 @@ function PlannedOrders({ records, weeks, weekLabels, orderStatus, setOrderStatus
   );
 }
 
-export default function MRPDashboard() {
+function MRPDashboardInner({ role, onLogout }) {
   const [bom, setBom] = useState(SAMPLE_BOM);
   const [inventory, setInventory] = useState(SAMPLE_INVENTORY);
   const [demand, setDemand] = useState(SAMPLE_DEMAND);
@@ -1508,6 +1607,7 @@ export default function MRPDashboard() {
   const [draftRefs, setDraftRefs] = useState({}); // เลขที่ PR/PO ฉบับร่างที่พิมพ์เอง กรณีระบบยังไม่ได้ดึงมาให้อัตโนมัติ
   const [selected, setSelected] = useState("BIKE-100");
   const [isMobile, setIsMobile] = useState(() => typeof window !== "undefined" && window.innerWidth < 800);
+  const isReadOnly = role !== "admin"; // สิทธิ์แก้ไขได้เฉพาะ admin เท่านั้น มาจาก session ที่ login ไว้
   const [mobileTab, setMobileTab] = useState("items"); // "items" | "details" — ใช้เฉพาะจอมือถือ
   const [uploadsOpen, setUploadsOpen] = useState(() => !(typeof window !== "undefined" && window.innerWidth < 800));
 
@@ -1519,10 +1619,29 @@ export default function MRPDashboard() {
   const [onlyWithOrders, setOnlyWithOrders] = useState(false);
   const [viewMode, setViewMode] = useState("assembly");
   const [searchQuery, setSearchQuery] = useState("");
-  const [forceOpen, setForceOpen] = useState(null);
+  const [showBOM, setShowBOM] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiMessages, setAiMessages] = useState([]); // [{role: "user"|"assistant", content}]
+  const [aiInput, setAiInput] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const [bomFilter, setBomFilter] = useState("");
+  const [coverageFilter, setCoverageFilter] = useState("");
+  const [coverageProjectFilter, setCoverageProjectFilter] = useState("");
+  const [kpiModal, setKpiModal] = useState(null); // { title, columns, rows: [{item, cells}] }
+  const [kpiModalFilter, setKpiModalFilter] = useState("");
+  const [showCoverage, setShowCoverage] = useState(false);
+  const [showShipment, setShowShipment] = useState(false);
+  const [shipmentFilter, setShipmentFilter] = useState("");
+  const [shipmentMethod, setShipmentMethod] = useState({}); // "item::poNumber" -> "sea" | "air" (override จากค่าที่ระบบแนะนำ)
+  const [shipmentTracking, setShipmentTracking] = useState({}); // "item::poNumber" -> { status, actualArrivalDate }
+  const SEA_WEEKS = 10;
+  const AIR_WEEKS = 2;
+  const [bomProjectFilter, setBomProjectFilter] = useState("");
+  const [forceOpen, setForceOpen] = useState({ value: null, key: 0 });
   
   useEffect(() => {
-    if (onlyWithOrders) setForceOpen(true);
+    if (onlyWithOrders) setForceOpen({ value: true, key: Date.now() });
   }, [onlyWithOrders]);
   
   const [loadedFlags, setLoadedFlags] = useState({ bom: false, inventory: false, demand: false, poPending: false, git: false, actualConsumption: false, batches: false });
@@ -1537,7 +1656,7 @@ const [hydrating, setHydrating] = useState(true);
   // ---------------------------------------------------------
   useEffect(() => {
     (async () => {
-      const [savedOrderStatus, savedPlanOverrides, savedReceiptOverrides, savedHorizon, savedHistoryWeeks, savedPoOverrides, savedDraftRefs] = await Promise.all([
+      const [savedOrderStatus, savedPlanOverrides, savedReceiptOverrides, savedHorizon, savedHistoryWeeks, savedPoOverrides, savedDraftRefs, savedShipmentMethod, savedShipmentTracking] = await Promise.all([
         storageGet("orderStatus"),
         storageGet("planOverrides"),
         storageGet("receiptOverrides"),
@@ -1545,6 +1664,8 @@ const [hydrating, setHydrating] = useState(true);
         storageGet("historyWeeks"),
         storageGet("poOverrides"),
         storageGet("draftRefs"),
+        storageGet("shipmentMethod"),
+        storageGet("shipmentTracking"),
       ]);
       if (savedOrderStatus) setOrderStatus(savedOrderStatus);
       if (savedPlanOverrides) setPlanOverrides(savedPlanOverrides);
@@ -1553,6 +1674,8 @@ const [hydrating, setHydrating] = useState(true);
       if (savedHistoryWeeks !== null && savedHistoryWeeks !== undefined) setHistoryWeeks(savedHistoryWeeks);
       if (savedPoOverrides) setPoOverrides(savedPoOverrides);
       if (savedDraftRefs) setDraftRefs(savedDraftRefs);
+      if (savedShipmentMethod) setShipmentMethod(savedShipmentMethod);
+      if (savedShipmentTracking) setShipmentTracking(savedShipmentTracking);
       setSettingsLoaded(true);
     })();
   }, []);
@@ -1565,6 +1688,8 @@ const [hydrating, setHydrating] = useState(true);
   useEffect(() => { if (settingsLoaded) storageSet("historyWeeks", historyWeeks); }, [historyWeeks, settingsLoaded]);
   useEffect(() => { if (settingsLoaded) storageSet("poOverrides", poOverrides); }, [poOverrides, settingsLoaded]);
   useEffect(() => { if (settingsLoaded) storageSet("draftRefs", draftRefs); }, [draftRefs, settingsLoaded]);
+  useEffect(() => { if (settingsLoaded) storageSet("shipmentMethod", shipmentMethod); }, [shipmentMethod, settingsLoaded]);
+  useEffect(() => { if (settingsLoaded) storageSet("shipmentTracking", shipmentTracking); }, [shipmentTracking, settingsLoaded]);
 
   // ผสานค่า PO pending ที่ผู้ใช้แก้เอง (poOverrides) เข้ากับข้อมูลต้นฉบับที่ดึงมาจาก SharePoint เสมอ
   // ทำให้ต่อให้ดึงข้อมูลใหม่ (ตอนโหลดหน้า/รีเฟรช) ค่าที่เคยแก้ไว้ก็จะยังถูกทับกลับเข้าไปให้อัตโนมัติ
@@ -1582,8 +1707,15 @@ const [hydrating, setHydrating] = useState(true);
     });
   };
 
+  const updateShipmentTracking = (key, patch) => {
+    setShipmentTracking((prev) => ({
+      ...prev,
+      [key]: { ...(prev[key] || { status: "not_shipped", actualArrivalDate: "" }), ...patch },
+    }));
+  };
+
   const clearSavedSettings = async () => {
-    await storageClearAll(["orderStatus", "planOverrides", "receiptOverrides", "horizon", "historyWeeks", "poOverrides", "draftRefs"]);
+    await storageClearAll(["orderStatus", "planOverrides", "receiptOverrides", "horizon", "historyWeeks", "poOverrides", "draftRefs", "shipmentMethod", "shipmentTracking"]);
     setOrderStatus({});
     setPlanOverrides({});
     setReceiptOverrides({});
@@ -1591,6 +1723,8 @@ const [hydrating, setHydrating] = useState(true);
     setHorizon(12);
     setHistoryWeeks(4);
     setPoOverrides({});
+    setShipmentMethod({});
+    setShipmentTracking({});
   };
 
   // ---------------------------------------------------------
@@ -1946,6 +2080,45 @@ const [hydrating, setHydrating] = useState(true);
 
   const topItems = useMemo(() => order.filter((it) => !records[it].hasParents), [order, records]);
 
+  // กรุ๊ป FG (top-level item) ตาม project — project = 3 ตัวแรกของรหัส FG เช่น G8X-011-102 -> G8X
+  const projectGroups = useMemo(() => {
+    const map = {};
+    topItems.forEach((it) => {
+      if (!isProjectCode(it)) return; // ข้าม raw material ที่ขึ้นต้นด้วยตัวเลข (เช่น 140, 240)
+      const code = it.slice(0, 3).toUpperCase();
+      map[code] = map[code] || [];
+      map[code].push(it);
+    });
+    return Object.keys(map).sort().map((p) => ({ project: p, items: map[p].sort() }));
+  }, [topItems]);
+
+  // ไล่ BOM ลงจาก FG แต่ละ project เพื่อรู้ว่า item ไหน (รวม raw material) อยู่ใน project ไหนบ้าง
+  // item ที่ใช้ร่วมกันหลาย project จะติดแท็กได้มากกว่า 1 project
+  const itemProjectsMap = useMemo(() => {
+    const map = {};
+    topItems.forEach((it) => {
+      if (!isProjectCode(it)) return;
+      const project = it.slice(0, 3).toUpperCase();
+      const visited = new Set();
+      const stack = [it];
+      while (stack.length > 0) {
+        const cur = stack.pop();
+        if (visited.has(cur)) continue;
+        visited.add(cur);
+        if (!map[cur]) map[cur] = new Set();
+        map[cur].add(project);
+        (childrenOf[cur] || []).forEach((k) => stack.push(k.component));
+      }
+    });
+    return map;
+  }, [topItems, childrenOf]);
+
+  const coverageProjectOptions = useMemo(() => {
+    const set = new Set();
+    Object.values(itemProjectsMap).forEach((projSet) => projSet.forEach((p) => set.add(p)));
+    return Array.from(set).sort();
+  }, [itemProjectsMap]);
+
   const searchResults = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return null;
@@ -1958,6 +2131,318 @@ const [hydrating, setHydrating] = useState(true);
       );
     });
   }, [searchQuery, order, records]);
+
+  // BOM แบบระเบิดครบ (parent -> component) พร้อมข้อมูลเสริมจาก records สำหรับหน้า BOM / export
+  const bomRows = useMemo(() => {
+    const rows = [];
+    Object.entries(childrenOf).forEach(([parent, kids]) => {
+      const prec = records[parent];
+      kids.forEach(({ component, qty_per }) => {
+        const crec = records[component];
+        rows.push({
+          project: isProjectCode(parent) ? parent.slice(0, 3).toUpperCase() : "",
+          parent_item: parent,
+          parent_description: prec ? prec.description : "",
+          parent_level: prec ? prec.level : "",
+          component_item: component,
+          component_description: crec ? crec.description : "",
+          qty_per,
+          component_unit: crec ? crec.unit : "",
+          component_vendor: crec ? crec.vendor : "",
+          component_lead_time_weeks: crec ? crec.leadTime : "",
+          component_lot_size: crec ? crec.lotSize : "",
+          component_mold_family: crec ? (crec.moldFamily || "") : "",
+        });
+      });
+    });
+    return rows.sort((a, b) => a.parent_item.localeCompare(b.parent_item) || a.component_item.localeCompare(b.component_item));
+  }, [childrenOf, records]);
+
+  const bomProjectOptions = useMemo(() => Array.from(new Set(bomRows.map((r) => r.project))).filter(Boolean).sort(), [bomRows]);
+
+  const bomRowsFiltered = useMemo(() => {
+    const q = bomFilter.trim().toLowerCase();
+    return bomRows.filter((r) => {
+      if (bomProjectFilter && r.project !== bomProjectFilter) return false;
+      if (!q) return true;
+      return (
+        r.parent_item.toLowerCase().includes(q) ||
+        r.component_item.toLowerCase().includes(q) ||
+        (r.parent_description || "").toLowerCase().includes(q) ||
+        (r.component_description || "").toLowerCase().includes(q) ||
+        (r.component_vendor || "").toLowerCase().includes(q)
+      );
+    });
+  }, [bomRows, bomFilter, bomProjectFilter]);
+
+  const exportBOM = () => {
+    const suffix = bomProjectFilter ? `_${bomProjectFilter}` : "";
+    downloadCSV(`bom_export${suffix}_${new Date().toISOString().slice(0, 10)}.csv`, bomRowsFiltered);
+  };
+
+  // Stock coverage: on-hand หารด้วยอัตราเบิกใช้เฉลี่ยต่อสัปดาห์ (Past AVG) = จะอยู่ได้กี่สัปดาห์
+  // coverage_weeks = null หมายถึงไม่มีข้อมูล consumption ในอดีตให้เทียบ (หารด้วย 0 ไม่ได้)
+  const coverageRows = useMemo(() => {
+    const rows = order.map((item) => {
+      const rec = records[item];
+      const avg = rec.pastActualAvg;
+      const coverageWeeks = avg > 0 ? rec.usableOnHand / avg : null;
+      return {
+        item,
+        description: rec.description,
+        unit: rec.unit,
+        vendor: rec.vendor,
+        on_hand_usable: rec.usableOnHand,
+        avg_weekly_consumption: avg,
+        lead_time_weeks: rec.leadTime,
+        coverage_weeks: coverageWeeks,
+      };
+    });
+    return rows.sort((a, b) => {
+      if (a.coverage_weeks === null && b.coverage_weeks === null) return a.item.localeCompare(b.item);
+      if (a.coverage_weeks === null) return 1;
+      if (b.coverage_weeks === null) return -1;
+      return a.coverage_weeks - b.coverage_weeks;
+    });
+  }, [order, records]);
+
+  const coverageRowsFiltered = useMemo(() => {
+    const q = coverageFilter.trim().toLowerCase();
+    return coverageRows.filter((r) => {
+      if (coverageProjectFilter) {
+        const projs = itemProjectsMap[r.item];
+        if (!projs || !projs.has(coverageProjectFilter)) return false;
+      }
+      if (!q) return true;
+      return (
+        r.item.toLowerCase().includes(q) ||
+        (r.description || "").toLowerCase().includes(q) ||
+        (r.vendor || "").toLowerCase().includes(q)
+      );
+    });
+  }, [coverageRows, coverageFilter, coverageProjectFilter, itemProjectsMap]);
+
+  const exportCoverage = () => {
+    const suffix = coverageProjectFilter ? `_${coverageProjectFilter}` : "";
+    downloadCSV(`stock_coverage${suffix}_${new Date().toISOString().slice(0, 10)}.csv`, coverageRowsFiltered.map((r) => ({
+      ...r,
+      coverage_weeks: r.coverage_weeks === null ? "" : Math.round(r.coverage_weeks * 10) / 10,
+    })));
+  };
+
+  // Import Shipment Planning: เทียบ coverage ของแต่ละ item กับ lead time ของ Sea (10wk) / Air (2wk)
+  // เพื่อแนะนำว่าควรส่งทางเรือ (ถูกแต่ช้า) หรือทางอากาศ (แพงแต่เร็ว) ให้ถึงทันก่อนสต็อกหมด
+  // แสดงเฉพาะ item ที่มี PO pending เปิดอยู่จริงเท่านั้น
+  const STATUS_TRACKING_OPTIONS = [
+    { value: "not_shipped", label: "ยังไม่ส่ง", bg: "#E4E7EC", color: COLORS.inkSoft },
+    { value: "in_transit", label: "กำลังขนส่ง", bg: "#E0E7FF", color: COLORS.steelDeep },
+    { value: "arrived", label: "มาถึงแล้ว (รอตรวจรับ)", bg: "#FEF3C7", color: COLORS.amber },
+    { value: "received", label: "ตรวจรับแล้ว", bg: "#DCFCE7", color: COLORS.moss },
+  ];
+
+  const shipmentRows = useMemo(() => {
+    const rows = [];
+    order.forEach((item) => {
+      const rec = records[item];
+      if (!(rec.poPendingDetails && rec.poPendingDetails.length > 0 && rec.isOverseas)) return;
+      const avg = rec.pastActualAvg;
+      const coverageWeeks = avg > 0 ? rec.usableOnHand / avg : null;
+      let recommended;
+      if (coverageWeeks === null) recommended = "sea"; // ไม่มีข้อมูล consumption ให้เทียบ ใช้ทางเลือกประหยัดเป็นค่าเริ่มต้น
+      else if (coverageWeeks < AIR_WEEKS) recommended = "critical";
+      else if (coverageWeeks < SEA_WEEKS) recommended = "air";
+      else recommended = "sea";
+
+      rec.poPendingDetails.forEach((p) => {
+        const key = `${item}::${p.poNumber}`;
+        const chosen = shipmentMethod[key] || (recommended === "critical" ? "air" : recommended);
+        const chosenWeeks = chosen === "air" ? AIR_WEEKS : SEA_WEEKS;
+        const willArriveInTime = coverageWeeks === null ? true : coverageWeeks >= chosenWeeks;
+        const etaDate = new Date(Date.now() + chosenWeeks * 7 * 86400000);
+        const tracking = shipmentTracking[key] || { status: "not_shipped", actualArrivalDate: "" };
+        rows.push({
+          key,
+          item,
+          poNumber: p.poNumber,
+          description: rec.description,
+          unit: rec.unit,
+          vendor: p.vendor || rec.vendor,
+          qty: p.quantity,
+          dueWeek: p.weekLabel,
+          onHand: rec.usableOnHand,
+          coverageWeeks,
+          recommended,
+          chosen,
+          willArriveInTime,
+          etaDate: etaDate.toISOString().slice(0, 10),
+          status: tracking.status,
+          actualArrivalDate: tracking.actualArrivalDate || "",
+        });
+      });
+    });
+    return rows.sort((a, b) => {
+      const av = a.coverageWeeks === null ? Infinity : a.coverageWeeks;
+      const bv = b.coverageWeeks === null ? Infinity : b.coverageWeeks;
+      return av - bv;
+    });
+  }, [order, records, shipmentMethod, shipmentTracking]);
+
+  const shipmentRowsFiltered = useMemo(() => {
+    const q = shipmentFilter.trim().toLowerCase();
+    if (!q) return shipmentRows;
+    return shipmentRows.filter((r) =>
+      r.item.toLowerCase().includes(q) ||
+      (r.description || "").toLowerCase().includes(q) ||
+      (r.vendor || "").toLowerCase().includes(q)
+    );
+  }, [shipmentRows, shipmentFilter]);
+
+  const setShipmentMethodForKey = (key, method) => {
+    setShipmentMethod((prev) => ({ ...prev, [key]: method }));
+  };
+
+  const exportShipment = () => {
+    downloadCSV(`import_shipment_plan_${new Date().toISOString().slice(0, 10)}.csv`, shipmentRowsFiltered.map((r) => ({
+      item: r.item, po_number: r.poNumber, description: r.description, unit: r.unit, vendor: r.vendor,
+      qty: r.qty, due_week: r.dueWeek,
+      on_hand_usable: r.onHand,
+      coverage_weeks: r.coverageWeeks === null ? "" : Math.round(r.coverageWeeks * 10) / 10,
+      recommended_method: r.recommended,
+      chosen_method: r.chosen,
+      will_arrive_in_time: r.willArriveInTime ? "yes" : "no",
+      eta_date: r.etaDate,
+      tracking_status: r.status,
+      actual_arrival_date: r.actualArrivalDate,
+    })));
+  };
+
+  // สร้างสรุปข้อมูล MRP ปัจจุบันให้ AI ใช้ตอบคำถาม — เน้นรายการที่ต้องสั่งซื้อ/วิกฤต เพื่อคุมขนาด context ไม่ให้ใหญ่เกินไป
+  const buildAIContext = (question) => {
+    // 0) หา item code หรือ project code ที่ถูกพิมพ์มาในคำถามโดยตรง แล้วดึงข้อมูลแบบละเอียดใส่ไว้บนสุดเสมอ
+    //    ไม่ว่าจะโดน cap ของ "สรุป item ทั้งหมด" ด้านล่างหรือไม่ก็ตาม — กันปัญหา AI หา item ไม่เจอเวลาระบบมี item เยอะมาก
+    const qUpper = (question || "").toUpperCase().replace(/[^A-Z0-9]/g, " ");
+    const directItemMatches = order.filter((it) => qUpper.includes(it.toUpperCase()));
+    const mentionedProjects = projectGroups.map((g) => g.project).filter((p) => qUpper.includes(p));
+    const projectMatchItems = new Set();
+    mentionedProjects.forEach((p) => {
+      Object.entries(itemProjectsMap).forEach(([it, set]) => { if (set.has(p)) projectMatchItems.add(it); });
+    });
+    const guaranteedItems = Array.from(new Set([...directItemMatches, ...projectMatchItems]));
+
+    let guaranteedSection = "";
+    if (guaranteedItems.length > 0) {
+      const gLines = guaranteedItems.slice(0, 500).map((item) => {
+        const rec = records[item];
+        const avg = rec.pastActualAvg;
+        const coverageWeeks = avg > 0 ? (rec.usableOnHand / avg).toFixed(1) : "no-data";
+        const projSet = itemProjectsMap[item];
+        const projects = projSet && projSet.size > 0 ? Array.from(projSet).join(",") : (isProjectCode(item) ? item.slice(0, 3).toUpperCase() : "");
+        const basic = `${item}|${rec.description}|unit=${rec.unit}|project=${projects || "-"}|vendor=${rec.vendor || "-"}|mold_family=${rec.moldFamily || "-"}|on_hand_usable=${rec.usableOnHand}|on_hand_total=${rec.onHand}|safety_stock=${rec.safety}|coverage_weeks=${coverageWeeks}|lead_time_wk=${rec.leadTime}`;
+        const wkStart = historyWeeks;
+        const wkEnd = Math.min(wkStart + 8, weekLabels.length);
+        const snapshot = [];
+        for (let i = wkStart; i < wkEnd; i++) {
+          snapshot.push(`${weekLabels[i]}: on_hand=${rec.projOnHand[i] ?? "-"}, planned_release=${rec.plannedRelease[i] || 0}`);
+        }
+        return `${basic}\n  แนวโน้ม 8 สัปดาห์ข้างหน้า: ${snapshot.join(" | ")}`;
+      }).join("\n");
+      const gTrunc = guaranteedItems.length > 500 ? ` (แสดง 500 จาก ${guaranteedItems.length} รายการที่ตรงกับคำถาม)` : "";
+      guaranteedSection = `\n=== ข้อมูลที่ตรงกับคำถามของคุณโดยตรง${gTrunc} ===\n${gLines}\n`;
+    }
+
+    // สรุปข้อมูลทุก item ให้ AI ใช้ตอบคำถามทั่วไปได้ (ไม่ใช่แค่รายการที่ต้องสั่งซื้อ)
+    // เรียง item ที่เป็น FG/project code ให้มาก่อนเสมอ กันไม่ให้ถูกตัดออกเวลามี raw material เยอะมาก
+    const ITEM_CAP = 4000; // Gemini รับ context ได้ถึง ~1M token จึงกั๊กน้อยกว่าเดิมมาก
+    const projectCodedItems = order.filter((it) => isProjectCode(it) || (itemProjectsMap[it] && itemProjectsMap[it].size > 0));
+    const otherItems = order.filter((it) => !(isProjectCode(it) || (itemProjectsMap[it] && itemProjectsMap[it].size > 0)));
+    const orderedForContext = [...projectCodedItems, ...otherItems];
+    const itemLines = orderedForContext.slice(0, ITEM_CAP).map((item) => {
+      const rec = records[item];
+      const avg = rec.pastActualAvg;
+      const coverageWeeks = avg > 0 ? (rec.usableOnHand / avg).toFixed(1) : "no-data";
+      const ownProject = isProjectCode(item) ? item.slice(0, 3).toUpperCase() : "";
+      const projSet = itemProjectsMap[item];
+      const projects = projSet && projSet.size > 0 ? Array.from(projSet).join(",") : ownProject;
+      return `${item}|${rec.description}|project=${projects || "-"}|vendor=${rec.vendor || "-"}|mold_family=${rec.moldFamily || "-"}|on_hand_usable=${rec.usableOnHand}|safety_stock=${rec.safety}|coverage_weeks=${coverageWeeks}|lead_time_wk=${rec.leadTime}`;
+    }).join("\n");
+    const itemTruncNote = orderedForContext.length > ITEM_CAP ? ` (แสดง ${ITEM_CAP} จาก ${orderedForContext.length} รายการ — เรียง item ที่มี project มาก่อนแล้ว ยังมีอีกที่ไม่ได้แสดง)` : "";
+
+    const plannedRows = [];
+    order.forEach((item) => {
+      const rec = records[item];
+      rec.plannedRelease.forEach((v, i) => {
+        if (v > 0) {
+          plannedRows.push({
+            item,
+            description: rec.description,
+            own_project: isProjectCode(item) ? item.slice(0, 3).toUpperCase() : "",
+            parent_items: (rec.parentItems || []).join(","),
+            vendor: rec.vendor,
+            mold_family: rec.moldFamily || "",
+            release_week: weekLabels[i],
+            qty: Math.round(v),
+            past_due: rec.pastDue[i] ? "yes" : "no",
+          });
+        }
+      });
+    });
+    const capped = plannedRows.slice(0, 300);
+    const lines = capped
+      .map((r) => `${r.item}|${r.description}|project=${r.own_project || "-"}|parents=${r.parent_items || "-"}|vendor=${r.vendor || "-"}|mold_family=${r.mold_family || "-"}|release_week=${r.release_week}|qty=${r.qty}|past_due=${r.past_due}`)
+      .join("\n");
+    const truncNote = plannedRows.length > capped.length ? ` (แสดง ${capped.length} จาก ${plannedRows.length} รายการ — ยังมีอีกที่ไม่ได้แสดง)` : "";
+
+    const selectedLine = selected && records[selected]
+      ? `\n\nItem ที่กำลังเปิดดูอยู่ตอนนี้: ${selected} (${records[selected].description}) — on-hand usable/total: ${records[selected].usableOnHand}/${records[selected].onHand} ${records[selected].unit}, safety stock: ${records[selected].safety}, vendor: ${records[selected].vendor || "-"}`
+      : "";
+
+    return [
+      `วันที่รัน: ${new Date().toISOString().slice(0, 10)}`,
+      `Horizon: ${horizon} สัปดาห์, History: ${historyWeeks} สัปดาห์, สัปดาห์อ้างอิงปัจจุบัน: ${weekLabels[historyWeeks] || "-"}`,
+      `จำนวน item ทั้งหมดในระบบ: ${order.length}`,
+      `KPI สรุป: past due releases=${kpis.pastDue}, planned orders in horizon=${kpis.ordersNeeded}, items below safety stock=${kpis.belowSafety}, expired stock=${kpis.expiredCount}, expiring within 4 wks=${kpis.expiringSoonCount}`,
+      guaranteedSection,
+      `สรุปข้อมูล item ทั้งหมด (item|description|project|vendor|mold_family|on_hand_usable|safety_stock|coverage_weeks|lead_time_wk)${itemTruncNote}:`,
+      itemLines || "(ไม่มีข้อมูล item)",
+      ``,
+      `รายการ planned order (item ที่ต้องสั่งซื้อในช่วง horizon) (item|description|project|parent_items|vendor|mold_family|release_week|qty|past_due)${truncNote}:`,
+      lines || "(ไม่มี planned order ในช่วง horizon ปัจจุบัน)",
+      selectedLine,
+    ].join("\n");
+  };
+
+  const askAI = async () => {
+    const question = aiInput.trim();
+    if (!question || aiLoading) return;
+    setAiError("");
+    const nextMessages = [...aiMessages, { role: "user", content: question }];
+    setAiMessages(nextMessages);
+    setAiInput("");
+    setAiLoading(true);
+    try {
+      const res = await fetch("/api/ask-ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          context: buildAIContext(question),
+          history: nextMessages.slice(0, -1),
+        }),
+      });
+      const data = await res.json();
+      if (res.status === 401) {
+        setAiError("Session หมดอายุ กรุณา login ใหม่");
+        onLogout();
+        return;
+      }
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setAiMessages((prev) => [...prev, { role: "assistant", content: data.answer || "(ไม่มีคำตอบ)" }]);
+    } catch (err) {
+      setAiError(String(err && err.message ? err.message : err));
+    } finally {
+      setAiLoading(false);
+    }
+  };
 
   const usedInMap = useMemo(() => {
     const map = {};
@@ -2012,6 +2497,129 @@ const [hydrating, setHydrating] = useState(true);
 
   const selectedRec = records[selected];
 
+  const openKpiModal = (kind) => {
+    let title = "";
+    let columns = [];
+    let rows = [];
+    switch (kind) {
+      case "pastDue": {
+        title = "Past due releases";
+        columns = ["ITEM", "DESCRIPTION", "RELEASE WEEK", "QTY"];
+        order.forEach((item) => {
+          const rec = records[item];
+          rec.plannedRelease.forEach((v, i) => {
+            if (v > 0 && rec.pastDue[i]) rows.push({ item, cells: [item, rec.description, weekLabels[i], Math.round(v)] });
+          });
+        });
+        break;
+      }
+      case "ordersNeeded": {
+        title = "Planned orders in horizon";
+        columns = ["ITEM", "DESCRIPTION", "RELEASE WEEK", "QTY", "PAST DUE"];
+        order.forEach((item) => {
+          const rec = records[item];
+          rec.plannedRelease.forEach((v, i) => {
+            if (v > 0) rows.push({ item, cells: [item, rec.description, weekLabels[i], Math.round(v), rec.pastDue[i] ? "yes" : "no"] });
+          });
+        });
+        break;
+      }
+      case "belowSafety": {
+        title = "Items below safety stock (wk 1)";
+        columns = ["ITEM", "DESCRIPTION", "ON HAND", "SAFETY STOCK"];
+        order.forEach((item) => {
+          const rec = records[item];
+          if (rec.projOnHand[historyWeeks] < rec.safety) rows.push({ item, cells: [item, rec.description, rec.projOnHand[historyWeeks], rec.safety] });
+        });
+        break;
+      }
+      case "itemCount": {
+        title = "Items in structure";
+        columns = ["ITEM", "DESCRIPTION", "VENDOR", "UNIT"];
+        order.forEach((item) => {
+          const rec = records[item];
+          rows.push({ item, cells: [item, rec.description, rec.vendor || "\u2014", rec.unit] });
+        });
+        break;
+      }
+      case "poPending": {
+        title = "PO pending";
+        columns = ["ITEM", "PO #", "VENDOR", "QTY", "DUE WEEK"];
+        order.forEach((item) => {
+          const rec = records[item];
+          (rec.poPendingDetails || []).forEach((p) => {
+            rows.push({ item, cells: [item, p.poNumber, p.vendor || "\u2014", p.quantity, p.weekLabel] });
+          });
+        });
+        break;
+      }
+      case "git": {
+        title = "Goods in transit";
+        columns = ["ITEM", "DESCRIPTION", "QTY"];
+        order.forEach((item) => {
+          const rec = records[item];
+          const gitTotal = (rec.git || []).reduce((s, v) => s + v, 0);
+          if (gitTotal > 0) rows.push({ item, cells: [item, rec.description, gitTotal] });
+        });
+        break;
+      }
+      case "expired": {
+        title = "Expired stock";
+        columns = ["ITEM", "DESCRIPTION", "EXPIRED QTY", "EXPIRED VALUE"];
+        order.forEach((item) => {
+          const rec = records[item];
+          if (rec.expired) rows.push({ item, cells: [item, rec.description, rec.expiredQty, rec.expiredValue.toLocaleString(undefined, { maximumFractionDigits: 0 })] });
+        });
+        break;
+      }
+      case "expiringSoon": {
+        title = "Expiring within 4 wks";
+        columns = ["ITEM", "DESCRIPTION", "WEEKS TO EXPIRY", "EXPIRY DATE"];
+        order.forEach((item) => {
+          const rec = records[item];
+          if (rec.expiringSoon) rows.push({ item, cells: [item, rec.description, rec.weeksToExpiry, rec.expiryDate || "\u2014"] });
+        });
+        break;
+      }
+      case "variance": {
+        title = "Consumption variance";
+        columns = ["ITEM", "DESCRIPTION", "WEEKS W/ VARIANCE"];
+        order.forEach((item) => {
+          const rec = records[item];
+          const count = rec.consumptionVariance.filter((v) => v !== null && Math.abs(v) >= 0.5).length;
+          if (count > 0) rows.push({ item, cells: [item, rec.description, count] });
+        });
+        break;
+      }
+      case "usableValue": {
+        title = "Usable inventory value";
+        columns = ["ITEM", "DESCRIPTION", "USABLE QTY", "VALUE"];
+        order.forEach((item) => {
+          const rec = records[item];
+          if (rec.usableValue > 0) rows.push({ item, cells: [item, rec.description, rec.usableOnHand, rec.usableValue] });
+        });
+        rows.sort((a, b) => b.cells[3] - a.cells[3]);
+        rows = rows.map((r) => ({ ...r, cells: [...r.cells.slice(0, 3), r.cells[3].toLocaleString(undefined, { maximumFractionDigits: 0 })] }));
+        break;
+      }
+      case "expiredValue": {
+        title = "Value at risk (expired)";
+        columns = ["ITEM", "DESCRIPTION", "EXPIRED QTY", "VALUE"];
+        order.forEach((item) => {
+          const rec = records[item];
+          if (rec.expiredValue > 0) rows.push({ item, cells: [item, rec.description, rec.expiredQty, rec.expiredValue] });
+        });
+        rows.sort((a, b) => b.cells[3] - a.cells[3]);
+        rows = rows.map((r) => ({ ...r, cells: [...r.cells.slice(0, 3), r.cells[3].toLocaleString(undefined, { maximumFractionDigits: 0 })] }));
+        break;
+      }
+      default:
+        return;
+    }
+    setKpiModalFilter("");
+    setKpiModal({ title, columns, rows });
+  };
+
   return (
     <div style={{ background: COLORS.paper, minHeight: "100%", padding: isMobile ? 10 : 18, fontFamily: "Inter, sans-serif" }}>
       <style>{`
@@ -2044,7 +2652,7 @@ const [hydrating, setHydrating] = useState(true);
         </div>
         <div style={{ padding: "10px 14px", borderRight: isMobile ? "none" : `1px solid ${COLORS.paperLine}`, borderBottom: isMobile ? `1px solid ${COLORS.paperLine}` : "none" }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft, letterSpacing: "0.06em" }}>HORIZON</div>
-          <input type="number" min={4} max={52} value={horizon}
+          <input type="number" min={4} max={52} value={horizon} disabled={isReadOnly}
             onChange={(e) => setHorizon(Math.max(4, Math.min(52, toNum(e.target.value, 12))))}
             style={{
               fontFamily: "'Space Grotesk', sans-serif", fontSize: 18, fontWeight: 700, color: COLORS.ink,
@@ -2052,7 +2660,7 @@ const [hydrating, setHydrating] = useState(true);
             }} /> <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.inkSoft }}>weeks</span>
           <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}>
             <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft }}>history</span>
-            <input type="number" min={0} max={12} value={historyWeeks}
+            <input type="number" min={0} max={12} value={historyWeeks} disabled={isReadOnly}
               onChange={(e) => setHistoryWeeks(Math.max(0, Math.min(12, toNum(e.target.value, 4))))}
               style={{
                 fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 700, color: COLORS.ink,
@@ -2074,13 +2682,29 @@ const [hydrating, setHydrating] = useState(true);
             {new Date().toISOString().slice(0, 10)}
           </div>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft, marginTop: 2 }}>
-            {hydrating ? "loading data from SharePoint\u2026" : "data loaded successfully"}
+            {hydrating ? "loading data from SharePoint…" : "data loaded successfully"}
           </div>
-          <button onClick={() => { if (window.confirm("ล้างค่า order status / ค่าที่ปรับเอง / horizon ที่บันทึกไว้ทั้งหมด?")) clearSavedSettings(); }} style={{
-            display: "flex", alignItems: "center", gap: 4, cursor: "pointer", marginTop: 4,
-            fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft,
-            border: `1px solid ${COLORS.paperLine}`, background: "transparent", padding: "2px 6px", borderRadius: COLORS.radiusSm,
-          }}>clear saved settings</button>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+            <span style={{
+              display: "flex", alignItems: "center", gap: 4, width: "fit-content",
+              fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, fontWeight: 600,
+              color: isReadOnly ? COLORS.amber : COLORS.moss,
+              border: `1px solid ${isReadOnly ? COLORS.amber : COLORS.moss}`,
+              background: isReadOnly ? "#FEF3C7" : "#DCFCE7", padding: "2px 8px", borderRadius: COLORS.radiusSm,
+            }}>{isReadOnly ? "\u{1F512}" : "\u2713"} {role === "admin" ? "admin" : "user (view-only)"}</span>
+            <button onClick={onLogout} style={{
+              display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
+              fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft,
+              border: `1px solid ${COLORS.paperLine}`, background: "transparent", padding: "2px 8px", borderRadius: COLORS.radiusSm,
+            }}>logout</button>
+          </div>
+          {!isReadOnly && (
+            <button onClick={() => { if (window.confirm("ล้างค่า order status / ค่าที่ปรับเอง / horizon ที่บันทึกไว้ทั้งหมด?")) clearSavedSettings(); }} style={{
+              display: "flex", alignItems: "center", gap: 4, cursor: "pointer", marginTop: 4,
+              fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft,
+              border: `1px solid ${COLORS.paperLine}`, background: "transparent", padding: "2px 6px", borderRadius: COLORS.radiusSm,
+            }}>clear saved settings</button>
+          )}
           <button onClick={exportPowerBI} style={{
             display: "flex", alignItems: "center", gap: 4, cursor: "pointer", marginTop: 4,
             fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, fontWeight: 600, color: "#fff",
@@ -2090,22 +2714,24 @@ const [hydrating, setHydrating] = useState(true);
       </div>
 
       {/* uploads */}
-      {isMobile && (
-        <button onClick={() => setUploadsOpen((o) => !o)} style={{
-          display: "flex", alignItems: "center", gap: 6, cursor: "pointer", marginBottom: 10,
-          fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.steel, fontWeight: 600,
-          border: `1px solid ${COLORS.steel}`, background: COLORS.card, borderRadius: COLORS.radiusSm,
-          padding: "8px 12px", width: "100%", justifyContent: "space-between",
-        }}>
-          <span>{"\u{1F4C1}"} Upload / data sources</span>
-          {uploadsOpen ? <ChevronsUp size={13} /> : <ChevronsDown size={13} />}
-        </button>
-      )}
-      <div style={{ display: (!isMobile || uploadsOpen) ? "flex" : "none", gap: 10, marginBottom: 16, flexWrap: "wrap", flexDirection: isMobile ? "column" : "row" }}>
-        <UploadSlot label="Bill of Materials" hint="parent_item, component_item, qty_per"
-          onFile={handleFile("bom", setBom)} loaded={loadedFlags.bom} count={bom.length}
+      {!isReadOnly && (
+        <>
+          {isMobile && (
+            <button onClick={() => setUploadsOpen((o) => !o)} style={{
+              display: "flex", alignItems: "center", gap: 6, cursor: "pointer", marginBottom: 10,
+              fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.steel, fontWeight: 600,
+              border: `1px solid ${COLORS.steel}`, background: COLORS.card, borderRadius: COLORS.radiusSm,
+              padding: "8px 12px", width: "100%", justifyContent: "space-between",
+            }}>
+              <span>{"\u{1F4C1}"} Upload / data sources</span>
+              {uploadsOpen ? <ChevronsUp size={13} /> : <ChevronsDown size={13} />}
+            </button>
+          )}
+          <div style={{ display: (!isMobile || uploadsOpen) ? "flex" : "none", gap: 10, marginBottom: 16, flexWrap: "wrap", flexDirection: isMobile ? "column" : "row" }}>
+            <UploadSlot label="Bill of Materials" hint="parent_item, component_item, qty_per"
+              onFile={handleFile("bom", setBom)} loaded={loadedFlags.bom} count={bom.length}
           onSample={() => { setBom(SAMPLE_BOM); setLoadedFlags((f) => ({ ...f, bom: false })); }} />
-        <UploadSlot label="Inventory Master" hint="item, on_hand, lead_time_weeks, lot_size, safety_stock, safety_factor, vendor, unit_price, expiry_date, mold_family (optional)"
+        <UploadSlot label="Inventory Master" hint="item, on_hand, lead_time_weeks, lot_size, safety_stock, safety_factor, vendor, unit_price, expiry_date, mold_family, country, is_overseas (optional)"
           onFile={handleFile("inventory", setInventory)} loaded={loadedFlags.inventory} count={inventory.length}
           onSample={() => { setInventory(SAMPLE_INVENTORY); setLoadedFlags((f) => ({ ...f, inventory: false })); }} />
         <UploadSlot label="Demand Schedule" hint="item, week (e.g. 26CW25), quantity"
@@ -2130,7 +2756,9 @@ const [hydrating, setHydrating] = useState(true);
           color: COLORS.inkSoft, border: `1px dashed ${COLORS.paperLine}`, background: "transparent",
           padding: "4px 10px", cursor: "pointer", alignSelf: "flex-start", marginTop: "auto", marginBottom: 6,
         }}><Download size={12} /> template</button>
-      </div>
+          </div>
+        </>
+      )}
 
       {poPendingHeaderWarning && (
         <div style={{
@@ -2169,20 +2797,375 @@ const [hydrating, setHydrating] = useState(true);
         display: "flex", gap: 10, marginBottom: 16, overflowX: "auto", paddingBottom: 4,
         scrollSnapType: "x mandatory", WebkitOverflowScrolling: "touch",
       } : { display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-        <KPI label="Past due releases" value={kpis.pastDue} tone="rust" icon={CircleAlert} mobile={isMobile} />
-        <KPI label="Planned orders in horizon" value={kpis.ordersNeeded} tone="steel" icon={ClipboardList} mobile={isMobile} />
-        <KPI label="Items below safety stock (wk 1)" value={kpis.belowSafety} tone="amber" icon={AlertTriangle} mobile={isMobile} />
-        <KPI label="Items in structure" value={kpis.itemCount} tone="moss" icon={Gauge} mobile={isMobile} />
-        <KPI label="PO pending" value={scheduledReceiptsPO.length} tone="amber" icon={ClipboardList} mobile={isMobile} />
-        <KPI label="Goods in transit" value={scheduledReceiptsGIT.length} tone="moss" icon={ClipboardList} mobile={isMobile} />
-        <KPI label="Expired stock" value={kpis.expiredCount} tone="rust" icon={CalendarX} mobile={isMobile} />
-        <KPI label="Expiring within 4 wks" value={kpis.expiringSoonCount} tone="amber" icon={CalendarX} mobile={isMobile} />
-        <KPI label="Consumption variance" value={kpis.varianceCount} tone="steel" icon={Scale} mobile={isMobile} />
-        <KPI label="Usable inventory value" value={kpis.totalValue.toLocaleString(undefined, { maximumFractionDigits: 0 })} tone="moss" icon={Gauge} mobile={isMobile} />
-        <KPI label="Value at risk (expired)" value={kpis.expiredValue.toLocaleString(undefined, { maximumFractionDigits: 0 })} tone="rust" icon={CalendarX} mobile={isMobile} />
+        <KPI label="Past due releases" value={kpis.pastDue} tone="rust" icon={CircleAlert} mobile={isMobile} onClick={() => openKpiModal("pastDue")} />
+        <KPI label="Planned orders in horizon" value={kpis.ordersNeeded} tone="steel" icon={ClipboardList} mobile={isMobile} onClick={() => openKpiModal("ordersNeeded")} />
+        <KPI label="Items below safety stock (wk 1)" value={kpis.belowSafety} tone="amber" icon={AlertTriangle} mobile={isMobile} onClick={() => openKpiModal("belowSafety")} />
+        <KPI label="Items in structure" value={kpis.itemCount} tone="moss" icon={Gauge} mobile={isMobile} onClick={() => openKpiModal("itemCount")} />
+        <KPI label="PO pending" value={scheduledReceiptsPO.length} tone="amber" icon={ClipboardList} mobile={isMobile} onClick={() => openKpiModal("poPending")} />
+        <KPI label="Goods in transit" value={scheduledReceiptsGIT.length} tone="moss" icon={ClipboardList} mobile={isMobile} onClick={() => openKpiModal("git")} />
+        <KPI label="Expired stock" value={kpis.expiredCount} tone="rust" icon={CalendarX} mobile={isMobile} onClick={() => openKpiModal("expired")} />
+        <KPI label="Expiring within 4 wks" value={kpis.expiringSoonCount} tone="amber" icon={CalendarX} mobile={isMobile} onClick={() => openKpiModal("expiringSoon")} />
+        <KPI label="Consumption variance" value={kpis.varianceCount} tone="steel" icon={Scale} mobile={isMobile} onClick={() => openKpiModal("variance")} />
+        <KPI label="Usable inventory value" value={kpis.totalValue.toLocaleString(undefined, { maximumFractionDigits: 0 })} tone="moss" icon={Gauge} mobile={isMobile} onClick={() => openKpiModal("usableValue")} />
+        <KPI label="Value at risk (expired)" value={kpis.expiredValue.toLocaleString(undefined, { maximumFractionDigits: 0 })} tone="rust" icon={CalendarX} mobile={isMobile} onClick={() => openKpiModal("expiredValue")} />
       </div>
 
       {/* main */}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+        {(showBOM || showCoverage || showShipment) && (
+          <button onClick={() => { setShowBOM(false); setShowCoverage(false); setShowShipment(false); }} style={{
+            display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+            fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600,
+            color: COLORS.inkSoft, background: "transparent",
+            border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radiusSm, padding: "6px 12px",
+          }}>{"←"} back to dashboard</button>
+        )}
+        <button onClick={() => { setShowBOM((s) => !s); setShowCoverage(false); setShowShipment(false); }} style={{
+          display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+          fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600,
+          color: showBOM ? "#fff" : COLORS.steel, background: showBOM ? COLORS.steel : "transparent",
+          border: `1px solid ${COLORS.steel}`, borderRadius: COLORS.radiusSm, padding: "6px 12px",
+        }}>
+          <ClipboardList size={13} /> {"\u{1F4CB} view full BOM"}
+        </button>
+        <button onClick={() => { setShowCoverage((s) => !s); setShowBOM(false); setShowShipment(false); }} style={{
+          display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+          fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600,
+          color: showCoverage ? "#fff" : COLORS.moss, background: showCoverage ? COLORS.moss : "transparent",
+          border: `1px solid ${COLORS.moss}`, borderRadius: COLORS.radiusSm, padding: "6px 12px",
+        }}>
+          <Scale size={13} /> {"\u{1F4C8} view stock coverage"}
+        </button>
+        <button onClick={() => { setShowShipment((s) => !s); setShowBOM(false); setShowCoverage(false); }} style={{
+          display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+          fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600,
+          color: showShipment ? "#fff" : COLORS.amber, background: showShipment ? COLORS.amber : "transparent",
+          border: `1px solid ${COLORS.amber}`, borderRadius: COLORS.radiusSm, padding: "6px 12px",
+        }}>
+          <ClipboardList size={13} /> {"\u2708\uFE0F view import shipment plan"}
+        </button>
+      </div>
+
+      {showShipment ? (
+        <div style={{
+          border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radius, boxShadow: COLORS.shadowLg,
+          background: COLORS.card, overflow: "hidden",
+        }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "10px 14px",
+            borderBottom: `1px solid ${COLORS.paperLine}`, flexWrap: "wrap", rowGap: 8,
+          }}>
+            <span style={{
+              display: "flex", alignItems: "center", gap: 6, fontFamily: "'Space Grotesk', sans-serif",
+              fontSize: 14, fontWeight: 700, color: COLORS.ink,
+            }}>
+              {"\u2708\uFE0F"} Import Shipment Planning — {shipmentRowsFiltered.length} items
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, fontWeight: 400, color: COLORS.inkSoft }}>
+                (Sea {SEA_WEEKS} wk · Air {AIR_WEEKS} wk)
+              </span>
+            </span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <input
+                type="text"
+                value={shipmentFilter}
+                onChange={(e) => setShipmentFilter(e.target.value)}
+                placeholder="ค้นหา item / vendor..."
+                style={{
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5,
+                  border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radiusSm,
+                  padding: "6px 10px", color: COLORS.ink, background: COLORS.paper, minWidth: 200,
+                }}
+              />
+              <button onClick={exportShipment} style={{
+                display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
+                fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600, color: "#fff",
+                border: `1px solid ${COLORS.amber}`, background: COLORS.amber, padding: "6px 12px", borderRadius: COLORS.radiusSm,
+              }}><Download size={12} /> export shipment plan</button>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 10, padding: "6px 14px", borderBottom: `1px solid ${COLORS.paperLine}`, flexWrap: "wrap" }}>
+            {STATUS_TRACKING_OPTIONS.map((s) => {
+              const count = shipmentRowsFiltered.filter((r) => r.status === s.value).length;
+              return (
+                <span key={s.value} style={{
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: s.color,
+                  display: "flex", alignItems: "center", gap: 4,
+                }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 999, background: s.bg, border: `1px solid ${s.color}`, display: "inline-block" }} />
+                  {s.label}: {count}
+                </span>
+              );
+            })}
+          </div>
+          <div style={{ overflowX: "auto", maxHeight: 640, overflowY: "auto" }}>
+            <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 }}>
+              <thead>
+                <tr style={{ position: "sticky", top: 0, background: COLORS.card, zIndex: 1 }}>
+                  {["ITEM", "PO #", "QTY", "DESCRIPTION", "VENDOR", "COVERAGE (WK)", "RECOMMENDED", "METHOD", "ETA", "ARRIVED?", "TRACKING STATUS", "ACTUAL ARRIVAL"].map((h) => (
+                    <td key={h} style={{ padding: "8px 10px", color: COLORS.inkSoft, borderBottom: `1px solid ${COLORS.paperLine}`, whiteSpace: "nowrap" }}>{h}</td>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {shipmentRowsFiltered.map((r) => {
+                  const recTone = r.recommended === "critical" ? COLORS.rust : r.recommended === "air" ? COLORS.amber : COLORS.moss;
+                  const recLabel = r.recommended === "critical" ? "\u26A0\uFE0F CRITICAL" : r.recommended === "air" ? "\u2708\uFE0F AIR" : "\u{1F6A2} SEA";
+                  const statusMeta = STATUS_TRACKING_OPTIONS.find((s) => s.value === r.status) || STATUS_TRACKING_OPTIONS[0];
+                  return (
+                    <tr key={r.key} onClick={() => handleSelectItem(r.item)} style={{ cursor: "pointer" }}>
+                      <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.steel, fontWeight: 600, whiteSpace: "nowrap" }}>{r.item}</td>
+                      <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.ink, whiteSpace: "nowrap" }}>{r.poNumber}</td>
+                      <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, textAlign: "right", whiteSpace: "nowrap" }}>{r.qty} {r.unit}</td>
+                      <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.inkSoft, whiteSpace: "nowrap", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis" }}>{r.description}</td>
+                      <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.inkSoft, whiteSpace: "nowrap" }}>{r.vendor || "\u2014"}</td>
+                      <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, textAlign: "right" }}>{r.coverageWeeks === null ? "no data" : r.coverageWeeks.toFixed(1)}</td>
+                      <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, whiteSpace: "nowrap" }}>
+                        <span style={{ color: recTone, fontWeight: 700, fontSize: 10.5 }}>{recLabel}</span>
+                      </td>
+                      <td style={{ padding: "4px 8px", borderBottom: `1px solid ${COLORS.paperLine}` }} onClick={(e) => e.stopPropagation()}>
+                        <select
+                          value={r.chosen}
+                          disabled={isReadOnly}
+                          onChange={(e) => setShipmentMethodForKey(r.key, e.target.value)}
+                          style={{
+                            fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, fontWeight: 600, padding: "3px 6px",
+                            borderRadius: 999, cursor: isReadOnly ? "default" : "pointer",
+                            background: r.chosen === "air" ? "#FEF3C7" : "#DCFCE7",
+                            color: r.chosen === "air" ? COLORS.amber : COLORS.moss,
+                            border: `1px solid ${r.chosen === "air" ? COLORS.amber : COLORS.moss}`,
+                          }}
+                        >
+                          <option value="sea">Sea ({SEA_WEEKS}wk)</option>
+                          <option value="air">Air ({AIR_WEEKS}wk)</option>
+                        </select>
+                      </td>
+                      <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.inkSoft, whiteSpace: "nowrap" }}>{r.etaDate}</td>
+                      <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, whiteSpace: "nowrap" }}>
+                        {r.willArriveInTime ? (
+                          <span style={{ color: COLORS.moss, fontWeight: 600, fontSize: 10.5 }}>{"\u2713"} ทันเวลา</span>
+                        ) : (
+                          <span style={{ color: COLORS.rust, fontWeight: 600, fontSize: 10.5 }}>{"\u2715"} ไม่ทัน</span>
+                        )}
+                      </td>
+                      <td style={{ padding: "4px 8px", borderBottom: `1px solid ${COLORS.paperLine}` }} onClick={(e) => e.stopPropagation()}>
+                        <select
+                          value={r.status}
+                          disabled={isReadOnly}
+                          onChange={(e) => updateShipmentTracking(r.key, { status: e.target.value })}
+                          style={{
+                            fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, fontWeight: 600, padding: "3px 6px",
+                            borderRadius: 999, cursor: isReadOnly ? "default" : "pointer",
+                            background: statusMeta.bg, color: statusMeta.color,
+                            border: `1px solid ${statusMeta.color}`,
+                          }}
+                        >
+                          {STATUS_TRACKING_OPTIONS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                        </select>
+                      </td>
+                      <td style={{ padding: "4px 8px", borderBottom: `1px solid ${COLORS.paperLine}` }} onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="date"
+                          value={r.actualArrivalDate}
+                          disabled={isReadOnly}
+                          onChange={(e) => updateShipmentTracking(r.key, { actualArrivalDate: e.target.value })}
+                          style={{
+                            fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, padding: "3px 6px",
+                            border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radiusSm,
+                            background: isReadOnly ? "transparent" : "#fff", color: COLORS.ink,
+                          }}
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
+                {shipmentRowsFiltered.length === 0 && (
+                  <tr><td colSpan={12} style={{ padding: 20, textAlign: "center", color: COLORS.inkSoft }}>ไม่มี item ที่ต้องวางแผนนำเข้าในตอนนี้</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ padding: "8px 14px", borderTop: `1px solid ${COLORS.paperLine}`, fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft }}>
+            แสดงเฉพาะ item ที่มี PO pending เปิดอยู่ และ vendor เป็นต่างประเทศ (oversea — เดาจากชื่อ vendor ที่ไม่มีตัวอักษรไทย) — RECOMMENDED คำนวณจาก coverage (on-hand \u00f7 อัตราเบิกใช้เฉลี่ย) เทียบกับ lead time ของ Sea/Air — {"\u26A0\uFE0F"} CRITICAL หมายถึง coverage ต่ำกว่า Air lead time แล้ว (แม้ส่งทางอากาศก็อาจไม่ทัน ควรเร่งเป็นพิเศษ) — เปลี่ยนวิธีขนส่งได้ที่ช่อง METHOD จะบันทึกไว้ให้อัตโนมัติ
+          </div>
+        </div>
+      ) : showCoverage ? (
+        <div style={{
+          border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radius, boxShadow: COLORS.shadowLg,
+          background: COLORS.card, overflow: "hidden",
+        }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "10px 14px",
+            borderBottom: `1px solid ${COLORS.paperLine}`, flexWrap: "wrap", rowGap: 8,
+          }}>
+            <span style={{
+              display: "flex", alignItems: "center", gap: 6, fontFamily: "'Space Grotesk', sans-serif",
+              fontSize: 14, fontWeight: 700, color: COLORS.ink,
+            }}>
+              <Scale size={16} color={COLORS.moss} /> Stock Coverage — {coverageRowsFiltered.length} items
+            </span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <select
+                value={coverageProjectFilter}
+                onChange={(e) => setCoverageProjectFilter(e.target.value)}
+                style={{
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, fontWeight: 600,
+                  border: `1px solid ${coverageProjectFilter ? COLORS.amber : COLORS.paperLine}`, borderRadius: COLORS.radiusSm,
+                  padding: "6px 10px", color: coverageProjectFilter ? COLORS.amber : COLORS.ink, background: coverageProjectFilter ? "#FEF3C7" : COLORS.paper,
+                }}
+              >
+                <option value="">All projects</option>
+                {coverageProjectOptions.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+              <input
+                type="text"
+                value={coverageFilter}
+                onChange={(e) => setCoverageFilter(e.target.value)}
+                placeholder="ค้นหา item / vendor..."
+                style={{
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5,
+                  border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radiusSm,
+                  padding: "6px 10px", color: COLORS.ink, background: COLORS.paper, minWidth: 200,
+                }}
+              />
+              <button onClick={exportCoverage} style={{
+                display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
+                fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600, color: "#fff",
+                border: `1px solid ${COLORS.moss}`, background: COLORS.moss, padding: "6px 12px", borderRadius: COLORS.radiusSm,
+              }}><Download size={12} /> export coverage CSV</button>
+            </div>
+          </div>
+          <div style={{ padding: "6px 4px", maxHeight: 640, overflowY: "auto" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft }}>
+              <div style={{ width: 190 }}>ITEM</div>
+              <div style={{ flex: 1 }}>COVERAGE (weeks of stock left, based on past avg consumption)</div>
+              <div style={{ width: 76, textAlign: "right" }}>WEEKS</div>
+            </div>
+            {coverageRowsFiltered.map((r) => {
+              const MAX_SCALE = 12;
+              const capped = r.coverage_weeks === null ? 0 : Math.min(r.coverage_weeks, MAX_SCALE);
+              const pct = (capped / MAX_SCALE) * 100;
+              const barColor = r.coverage_weeks === null
+                ? COLORS.paperLine
+                : r.coverage_weeks < r.lead_time_weeks
+                  ? COLORS.rust
+                  : r.coverage_weeks < r.lead_time_weeks * 1.5
+                    ? COLORS.amber
+                    : COLORS.moss;
+              const isSelected = selected === r.item;
+              return (
+                <div key={r.item} onClick={() => handleSelectItem(r.item)} style={{
+                  display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", cursor: "pointer",
+                  background: isSelected ? "#E0E7FF" : "transparent", borderRadius: COLORS.radiusSm,
+                }}>
+                  <div style={{ width: 190, overflow: "hidden" }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, fontWeight: 700, color: COLORS.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.item}</div>
+                    <div style={{ fontFamily: "Inter, sans-serif", fontSize: 9.5, color: COLORS.inkSoft, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.description}</div>
+                  </div>
+                  <div style={{ flex: 1, background: COLORS.paper, borderRadius: 6, height: 18, position: "relative", overflow: "hidden" }}>
+                    <div style={{ width: `${pct}%`, background: barColor, height: "100%", borderRadius: 6, transition: "width 0.2s ease" }} />
+                    {r.lead_time_weeks > 0 && r.lead_time_weeks <= MAX_SCALE && (
+                      <div title={`lead time: ${r.lead_time_weeks} wk`} style={{
+                        position: "absolute", top: 0, bottom: 0, left: `${(r.lead_time_weeks / MAX_SCALE) * 100}%`,
+                        width: 2, background: COLORS.ink, opacity: 0.4,
+                      }} />
+                    )}
+                  </div>
+                  <div style={{ width: 76, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 700, color: barColor === COLORS.paperLine ? COLORS.inkSoft : barColor }}>
+                    {r.coverage_weeks === null ? "no data" : r.coverage_weeks >= MAX_SCALE ? `${Math.round(r.coverage_weeks)}+ wk` : `${r.coverage_weeks.toFixed(1)} wk`}
+                  </div>
+                </div>
+              );
+            })}
+            {coverageRowsFiltered.length === 0 && (
+              <div style={{ padding: 20, textAlign: "center", color: COLORS.inkSoft, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
+                ไม่พบ item ที่ตรงกับการค้นหา
+              </div>
+            )}
+          </div>
+          <div style={{ padding: "8px 14px", borderTop: `1px solid ${COLORS.paperLine}`, fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, color: COLORS.inkSoft }}>
+            เส้นดำเข้มบนแท่ง = lead time ของ item นั้น (สีแดง = coverage ต่ำกว่า lead time / สีเหลือง = ต่ำกว่า 1.5×lead time / สีเขียว = ปลอดภัย สีเทา = ไม่มีข้อมูล consumption เทียบ)
+          </div>
+        </div>
+      ) : showBOM ? (
+        <div style={{
+          border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radius, boxShadow: COLORS.shadowLg,
+          background: COLORS.card, overflow: "hidden",
+        }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "10px 14px",
+            borderBottom: `1px solid ${COLORS.paperLine}`, flexWrap: "wrap", rowGap: 8,
+          }}>
+            <span style={{
+              display: "flex", alignItems: "center", gap: 6, fontFamily: "'Space Grotesk', sans-serif",
+              fontSize: 14, fontWeight: 700, color: COLORS.ink,
+            }}>
+              <ClipboardList size={16} color={COLORS.steel} /> Bill of Materials — {bomRowsFiltered.length} lines
+            </span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <select
+                value={bomProjectFilter}
+                onChange={(e) => setBomProjectFilter(e.target.value)}
+                style={{
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, fontWeight: 600,
+                  border: `1px solid ${bomProjectFilter ? COLORS.amber : COLORS.paperLine}`, borderRadius: COLORS.radiusSm,
+                  padding: "6px 10px", color: bomProjectFilter ? COLORS.amber : COLORS.ink, background: bomProjectFilter ? "#FEF3C7" : COLORS.paper,
+                }}
+              >
+                <option value="">All projects</option>
+                {bomProjectOptions.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+              <input
+                type="text"
+                value={bomFilter}
+                onChange={(e) => setBomFilter(e.target.value)}
+                placeholder="ค้นหา parent / component / vendor..."
+                style={{
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5,
+                  border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radiusSm,
+                  padding: "6px 10px", color: COLORS.ink, background: COLORS.paper, minWidth: 220,
+                }}
+              />
+              <button onClick={exportBOM} style={{
+                display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
+                fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600, color: "#fff",
+                border: `1px solid ${COLORS.steel}`, background: COLORS.steel, padding: "6px 12px", borderRadius: COLORS.radiusSm,
+              }}><Download size={12} /> export BOM CSV</button>
+            </div>
+          </div>
+          <div style={{ overflowX: "auto", maxHeight: 640, overflowY: "auto" }}>
+            <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 }}>
+              <thead>
+                <tr style={{ position: "sticky", top: 0, background: COLORS.card, zIndex: 1 }}>
+                  {["PROJECT", "PARENT ITEM", "PARENT DESC", "COMPONENT ITEM", "COMPONENT DESC", "QTY/PARENT", "UNIT", "VENDOR", "LEAD TIME", "LOT SIZE", "MOLD FAMILY"].map((h) => (
+                    <td key={h} style={{ padding: "8px 10px", color: COLORS.inkSoft, borderBottom: `1px solid ${COLORS.paperLine}`, whiteSpace: "nowrap", textAlign: h === "QTY/PARENT" || h === "LEAD TIME" || h === "LOT SIZE" ? "right" : "left" }}>{h}</td>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {bomRowsFiltered.map((r, idx) => (
+                  <tr key={`${r.parent_item}-${r.component_item}-${idx}`} onClick={() => handleSelectItem(r.component_item)} style={{ cursor: "pointer" }}>
+                    <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.steelDeep, fontWeight: 700, whiteSpace: "nowrap" }}>{r.project || "—"}</td>
+                    <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.ink, whiteSpace: "nowrap" }}>{r.parent_item}</td>
+                    <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.inkSoft, whiteSpace: "nowrap", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis" }}>{r.parent_description}</td>
+                    <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.steel, whiteSpace: "nowrap", fontWeight: 600 }}>{r.component_item}</td>
+                    <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.inkSoft, whiteSpace: "nowrap", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis" }}>{r.component_description}</td>
+                    <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, textAlign: "right" }}>{r.qty_per}</td>
+                    <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.inkSoft, whiteSpace: "nowrap" }}>{r.component_unit}</td>
+                    <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.inkSoft, whiteSpace: "nowrap" }}>{r.component_vendor || "—"}</td>
+                    <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, textAlign: "right" }}>{r.component_lead_time_weeks}</td>
+                    <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, textAlign: "right" }}>{r.component_lot_size}</td>
+                    <td style={{ padding: "6px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: COLORS.amber, whiteSpace: "nowrap" }}>{r.component_mold_family || "—"}</td>
+                  </tr>
+                ))}
+                {bomRowsFiltered.length === 0 && (
+                  <tr><td colSpan={11} style={{ padding: 20, textAlign: "center", color: COLORS.inkSoft }}>ไม่พบข้อมูล BOM ที่ตรงกับการค้นหา</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : (
+      <>
       {isMobile && (
         <div style={{
           display: "flex", gap: 6, marginBottom: 12, background: COLORS.card,
@@ -2211,7 +3194,7 @@ const [hydrating, setHydrating] = useState(true);
               display: "flex", alignItems: "center", gap: 6, fontFamily: "'Space Grotesk', sans-serif",
               fontSize: 12, fontWeight: 700, letterSpacing: "0.04em", color: COLORS.ink, textTransform: "uppercase",
             }}>
-              <PackageSearch size={14} color={COLORS.steel} /> {viewMode === "assembly" ? "Item Structure" : viewMode === "material" ? "Where-Used" : viewMode === "moldFamily" ? "By Mold Family" : "By Vendor"}
+              <PackageSearch size={14} color={COLORS.steel} /> {viewMode === "assembly" ? "Item Structure" : viewMode === "material" ? "Where-Used" : viewMode === "moldFamily" ? "By Mold Family" : viewMode === "project" ? "By Project" : "By Vendor"}
             </span>
             <label style={{
               display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
@@ -2223,7 +3206,7 @@ const [hydrating, setHydrating] = useState(true);
             </label>
           </div>
           <div style={{ display: "flex", borderBottom: `1px solid ${COLORS.paperLine}` }}>
-            {[["assembly", "Finished good \u2192 parts"], ["material", "Raw material \u2192 where-used"], ["vendor", "By vendor"], ...(moldFamilyGroups.length > 0 ? [["moldFamily", "By mold family"]] : [])].map(([mode, label]) => (
+            {[["assembly", "Finished good → parts"], ["project", "By project"], ["material", "Raw material → where-used"], ["vendor", "By vendor"], ...(moldFamilyGroups.length > 0 ? [["moldFamily", "By mold family"]] : [])].map(([mode, label]) => (
               <button key={mode} onClick={() => setViewMode(mode)} style={{
                 flex: 1, padding: "6px 6px", cursor: "pointer", border: "none",
                 background: viewMode === mode ? COLORS.steel : "transparent",
@@ -2256,12 +3239,12 @@ const [hydrating, setHydrating] = useState(true);
           </div>
           {!searchResults && (
             <div style={{ display: "flex", gap: 6, padding: "6px 12px", borderBottom: `1px solid ${COLORS.paperLine}` }}>
-              <button onClick={() => setForceOpen(true)} style={{
+              <button onClick={() => setForceOpen({ value: true, key: Date.now() })} style={{
                 display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
                 fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.steel,
                 border: `1px solid ${COLORS.steel}`, background: "transparent", padding: "3px 8px", borderRadius: COLORS.radiusSm,
               }}><ChevronsDown size={11} /> expand all</button>
-              <button onClick={() => setForceOpen(false)} style={{
+              <button onClick={() => setForceOpen({ value: false, key: Date.now() })} style={{
                 display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
                 fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.inkSoft,
                 border: `1px solid ${COLORS.paperLine}`, background: "transparent", padding: "3px 8px", borderRadius: COLORS.radiusSm,
@@ -2293,7 +3276,7 @@ const [hydrating, setHydrating] = useState(true);
                         {!critical && shortage && <AlertTriangle size={11} color={isSelected ? "#FEF3C7" : COLORS.amber} />}
                       </div>
                       <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, paddingLeft: 0, color: isSelected ? "#E4E7EC" : COLORS.inkSoft, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        {rec.description} {"\u00b7"} {rec.unit}{rec.vendor ? ` \u00b7 ${rec.vendor}` : ""}
+                        {rec.description} {"·"} {rec.unit}{rec.vendor ? ` · ${rec.vendor}` : ""}
                       </div>
                     </div>
                   );
@@ -2306,17 +3289,20 @@ const [hydrating, setHydrating] = useState(true);
               </>
             ) : viewMode === "vendor" ? (
               <VendorGroupTree groups={vendorGroups} records={records} selected={selected} onSelect={handleSelectItem}
-                onlyWithOrders={onlyWithOrders} forceOpen={forceOpen} clearForce={() => setForceOpen(null)} />
+                onlyWithOrders={onlyWithOrders} forceOpen={forceOpen} />
             ) : viewMode === "moldFamily" ? (
               <VendorGroupTree groups={moldFamilyGroups} records={records} selected={selected} onSelect={handleSelectItem}
-                onlyWithOrders={onlyWithOrders} forceOpen={forceOpen} clearForce={() => setForceOpen(null)} />
+                onlyWithOrders={onlyWithOrders} forceOpen={forceOpen} />
+            ) : viewMode === "project" ? (
+              <ProjectGroupTree groups={projectGroups} records={records} childrenOf={childrenOf} selected={selected} onSelect={handleSelectItem}
+                onlyWithOrders={onlyWithOrders} subtreeOrderMap={subtreeOrderMap} forceOpen={forceOpen} />
             ) : (
               <>
                 {visibleTopItems.map((it) => (
                   <TreeRow key={it} item={it} records={records} childrenOf={activeChildMap}
                     selected={selected} onSelect={handleSelectItem} depth={0}
                     onlyWithOrders={onlyWithOrders} subtreeOrderMap={activeOrderMap}
-                    forceOpen={forceOpen} clearForce={() => setForceOpen(null)} />
+                    forceOpen={forceOpen} />
                 ))}
                 {onlyWithOrders && visibleTopItems.length === 0 && (
                   <div style={{ padding: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.inkSoft, textAlign: "center" }}>
@@ -2335,15 +3321,285 @@ const [hydrating, setHydrating] = useState(true);
             onAdjustPOQty={adjustPOQty} poOriginalQtyMap={poOriginalQtyMap} onResetPOQty={resetPOQty}
             onAdjustPOWeek={adjustPOWeek} onResetPOWeek={resetPOWeek} poOriginalMap={poOriginalMap} 
             planOverrides={planOverrides} receiptOverrides={receiptOverrides} isMobile={isMobile}
-            draftRefs={draftRefs} onAdjustDraftRef={adjustDraftRef}
+            draftRefs={draftRefs} onAdjustDraftRef={adjustDraftRef} isReadOnly={isReadOnly}
             moldFamilyMembers={selectedRec && selectedRec.moldFamily ? (moldFamilyMap[selectedRec.moldFamily] || []).filter((it) => it !== selected) : []} />
-          <PlannedOrders records={records} weeks={weeks} weekLabels={weekLabels} orderStatus={orderStatus} setOrderStatus={setOrderStatus} selectedItem={selected} />
+          <PlannedOrders records={records} weeks={weeks} weekLabels={weekLabels} orderStatus={orderStatus} setOrderStatus={setOrderStatus} selectedItem={selected} isReadOnly={isReadOnly} />
         </div>
       </div>
+      </>
+      )}
 
       <div style={{ marginTop: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft }}>
-        Note: planned orders round up to lot size; PO pending is netted against gross requirements in the week it's due, GIT is treated as arriving in week 1 (no date needed since it's already shipped). Expired on-hand stock is excluded from the plan (treated as 0). Actual consumption is compared against calculated gross requirements in the same week; variance only shows where actual data was entered. "Planned order receipt", "Planned order release", and PO pending quantities are directly editable \u2014 type a new number to override the calculated plan (amber outline marks an override; click \u21ba to reset).
+        Note: planned orders round up to lot size; PO pending is netted against gross requirements in the week it's due, GIT is treated as arriving in week 1 (no date needed since it's already shipped). Expired on-hand stock is excluded from the plan (treated as 0). Actual consumption is compared against calculated gross requirements in the same week; variance only shows where actual data was entered. "Planned order receipt", "Planned order release", and PO pending quantities are directly editable — type a new number to override the calculated plan (amber outline marks an override; click ↺ to reset). Gross requirements marked with a superscript <b style={{ color: "#6D28D9" }}>F</b> are auto-forecasted from historical average demand — the Demand Schedule file has no confirmed order for that week yet (top-level items only; raw material requirements below them inherit the forecast automatically through the BOM explosion).
+      </div>
+
+      {/* AI chat — ถาม-ตอบข้อมูล MRP ด้วยภาษาธรรมชาติ */}
+      <button onClick={() => setAiOpen((o) => !o)} title="ถาม AI เกี่ยวกับข้อมูลในระบบ" style={{
+        position: "fixed", bottom: 20, right: 20, zIndex: 40,
+        width: 52, height: 52, borderRadius: 999, border: "none", cursor: "pointer",
+        background: COLORS.steel, color: "#fff", fontSize: 22,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        boxShadow: COLORS.shadowLg,
+      }}>{aiOpen ? "✕" : "\u{1F916}"}</button>
+
+      {aiOpen && (
+        <div style={{
+          position: "fixed", bottom: 82, right: 20, zIndex: 40,
+          width: isMobile ? "calc(100vw - 32px)" : 360, maxHeight: "70vh",
+          display: "flex", flexDirection: "column",
+          background: COLORS.card, border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radius, boxShadow: COLORS.shadowLg,
+          overflow: "hidden",
+        }}>
+          <div style={{
+            padding: "10px 14px", borderBottom: `1px solid ${COLORS.paperLine}`, background: COLORS.steel, color: "#fff",
+            fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 6,
+          }}>
+            {"\u{1F916}"} ถาม AI เกี่ยวกับข้อมูล MRP
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8, minHeight: 160 }}>
+            {aiMessages.length === 0 && (
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.inkSoft, lineHeight: 1.5 }}>
+                ลองถามได้เลย เช่น:
+                <br />• "item ไหนใน project G8X ต้องสั่งซื้อสัปดาห์นี้บ้าง"
+                <br />• "มี item อะไรค้างสั่งเกินกำหนด (past due) บ้าง"
+                <br />• "item 14001071 เหลือ stock เท่าไหร่ coverage กี่สัปดาห์"
+                <br />• "project RS3 มี item อะไรบ้าง vendor ไหนบ้าง"
+                <br /><br />
+                <i>หมายเหตุ: AI ตอบจากข้อมูลสรุป stock/coverage/planned order ที่คำนวณไว้แล้วในระบบเท่านั้น ไม่ได้คำนวณ MRP ใหม่เอง และอาจไม่เห็นรายละเอียดทุกสัปดาห์ของทุก item</i>
+              </div>
+            )}
+            {aiMessages.map((m, i) => (
+              <div key={i} style={{
+                alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                maxWidth: "85%", padding: "8px 12px", borderRadius: COLORS.radius,
+                background: m.role === "user" ? COLORS.steel : COLORS.paper,
+                color: m.role === "user" ? "#fff" : COLORS.ink,
+                fontFamily: "Inter, sans-serif", fontSize: 12.5, lineHeight: 1.5, whiteSpace: "pre-wrap",
+              }}>{m.content}</div>
+            ))}
+            {aiLoading && (
+              <div style={{ alignSelf: "flex-start", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.inkSoft }}>
+                กำลังคิด...
+              </div>
+            )}
+            {aiError && (
+              <div style={{ alignSelf: "flex-start", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.rust, background: "#FEE2E2", padding: "6px 10px", borderRadius: COLORS.radiusSm }}>
+                เกิดข้อผิดพลาด: {aiError}
+              </div>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6, padding: 10, borderTop: `1px solid ${COLORS.paperLine}` }}>
+            <input
+              type="text"
+              value={aiInput}
+              onChange={(e) => setAiInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); askAI(); } }}
+              placeholder="พิมพ์คำถาม..."
+              disabled={aiLoading}
+              style={{
+                flex: 1, fontFamily: "Inter, sans-serif", fontSize: 12.5,
+                border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radiusSm,
+                padding: "8px 10px", color: COLORS.ink, background: COLORS.paper,
+              }}
+            />
+            <button onClick={askAI} disabled={aiLoading || !aiInput.trim()} style={{
+              display: "flex", alignItems: "center", justifyContent: "center",
+              width: 38, cursor: aiLoading ? "default" : "pointer", border: "none", borderRadius: COLORS.radiusSm,
+              background: COLORS.steel, color: "#fff", opacity: aiLoading || !aiInput.trim() ? 0.5 : 1,
+            }}>{"➤"}</button>
+          </div>
+        </div>
+      )}
+
+      {/* KPI detail modal */}
+      {kpiModal && (
+        <div onClick={() => setKpiModal(null)} style={{
+          position: "fixed", inset: 0, zIndex: 60, background: "rgba(16,24,40,0.5)",
+          display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            width: isMobile ? "100%" : 640, maxHeight: "80vh", display: "flex", flexDirection: "column",
+            background: COLORS.card, borderRadius: COLORS.radius, boxShadow: COLORS.shadowLg, overflow: "hidden",
+          }}>
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "12px 16px",
+              borderBottom: `1px solid ${COLORS.paperLine}`,
+            }}>
+              <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 700, color: COLORS.ink }}>
+                {kpiModal.title} ({kpiModal.rows.length})
+              </span>
+              <button onClick={() => setKpiModal(null)} style={{
+                border: "none", background: "transparent", cursor: "pointer", color: COLORS.inkSoft, fontSize: 18, lineHeight: 1, padding: 4,
+              }}>&#10005;</button>
+            </div>
+            <div style={{ padding: "8px 16px", borderBottom: `1px solid ${COLORS.paperLine}` }}>
+              <input
+                type="text"
+                value={kpiModalFilter}
+                onChange={(e) => setKpiModalFilter(e.target.value)}
+                placeholder="ค้นหาในลิสต์นี้..."
+                autoFocus
+                style={{
+                  width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5,
+                  border: `1px solid ${COLORS.paperLine}`, borderRadius: COLORS.radiusSm,
+                  padding: "6px 10px", color: COLORS.ink, background: COLORS.paper,
+                }}
+              />
+            </div>
+            <div style={{ overflowY: "auto", flex: 1 }}>
+              <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11 }}>
+                <thead>
+                  <tr style={{ position: "sticky", top: 0, background: COLORS.card }}>
+                    {kpiModal.columns.map((c) => (
+                      <td key={c} style={{ padding: "6px 10px", color: COLORS.inkSoft, borderBottom: `1px solid ${COLORS.paperLine}`, whiteSpace: "nowrap" }}>{c}</td>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {kpiModal.rows
+                    .filter((r) => !kpiModalFilter.trim() || r.cells.some((c) => String(c).toLowerCase().includes(kpiModalFilter.trim().toLowerCase())))
+                    .slice(0, 500)
+                    .map((r, idx) => (
+                      <tr key={`${r.item}-${idx}`} onClick={() => { handleSelectItem(r.item); setKpiModal(null); }} style={{ cursor: "pointer" }}>
+                        {r.cells.map((c, i) => (
+                          <td key={i} style={{ padding: "5px 10px", borderBottom: `1px solid ${COLORS.paperLine}`, color: i === 0 ? COLORS.steel : COLORS.ink, fontWeight: i === 0 ? 600 : 400, whiteSpace: "nowrap" }}>{c}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  {kpiModal.rows.filter((r) => !kpiModalFilter.trim() || r.cells.some((c) => String(c).toLowerCase().includes(kpiModalFilter.trim().toLowerCase()))).length === 0 && (
+                    <tr><td colSpan={kpiModal.columns.length} style={{ padding: 20, textAlign: "center", color: COLORS.inkSoft }}>ไม่พบรายการที่ตรงกับการค้นหา</td></tr>
+                  )}
+                </tbody>
+              </table>
+              {kpiModal.rows.length > 500 && (
+                <div style={{ padding: "8px 16px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: COLORS.inkSoft }}>
+                  แสดง 500 รายการแรก จากทั้งหมด {kpiModal.rows.length} รายการ — ใช้ช่องค้นหาด้านบนเพื่อกรองแคบลง
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LoginScreen({ onLoggedIn }) {
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    if (!password.trim() || loading) return;
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "เข้าสู่ระบบไม่สำเร็จ");
+        setLoading(false);
+        return;
+      }
+      onLoggedIn(data.role);
+    } catch (err) {
+      setError(String(err && err.message ? err.message : err));
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{
+      minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+      background: COLORS.paper, fontFamily: "Inter, sans-serif", padding: 20,
+    }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+      `}</style>
+      <div style={{
+        width: 340, background: COLORS.card, border: `1px solid ${COLORS.paperLine}`,
+        borderRadius: COLORS.radius, boxShadow: COLORS.shadowLg, padding: 28,
+      }}>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, color: COLORS.ink, marginBottom: 4 }}>
+          MRP Dashboard
+        </div>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.inkSoft, marginBottom: 20 }}>
+          กรอกรหัสผ่านเพื่อเข้าใช้งาน
+        </div>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+          placeholder="รหัสผ่าน"
+          autoFocus
+          style={{
+            width: "100%", fontFamily: "'IBM Plex Mono', monospace", fontSize: 13,
+            border: `1px solid ${error ? COLORS.rust : COLORS.paperLine}`, borderRadius: COLORS.radiusSm,
+            padding: "10px 12px", color: COLORS.ink, background: COLORS.paper, marginBottom: 10,
+          }}
+        />
+        {error && (
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.rust, marginBottom: 10 }}>
+            {error}
+          </div>
+        )}
+        <button onClick={submit} disabled={loading || !password.trim()} style={{
+          width: "100%", padding: "10px 12px", cursor: loading ? "default" : "pointer",
+          border: "none", borderRadius: COLORS.radiusSm, background: COLORS.steel, color: "#fff",
+          fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5, fontWeight: 700,
+          opacity: loading || !password.trim() ? 0.6 : 1,
+        }}>
+          {loading ? "กำลังเข้าสู่ระบบ..." : "เข้าสู่ระบบ"}
+        </button>
       </div>
     </div>
   );
+}
+
+export default function App() {
+  const [role, setRole] = useState(null); // null = ยังไม่รู้/กำลังเช็ค, "admin" | "user" = login แล้ว
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/session");
+        const data = await res.json();
+        setRole(data.role || null);
+      } catch (e) {
+        setRole(null);
+      } finally {
+        setChecking(false);
+      }
+    })();
+  }, []);
+
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/logout", { method: "POST" });
+    } catch (e) { /* ignore */ }
+    setRole(null);
+  };
+
+  if (checking) {
+    return (
+      <div style={{
+        minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+        background: COLORS.paper, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: COLORS.inkSoft,
+      }}>
+        กำลังตรวจสอบสิทธิ์...
+      </div>
+    );
+  }
+
+  if (!role) {
+    return <LoginScreen onLoggedIn={setRole} />;
+  }
+
+  return <MRPDashboardInner role={role} onLogout={handleLogout} />;
 }
